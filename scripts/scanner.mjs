@@ -5,7 +5,18 @@ import {
   MODULE_VERSION,
   SUPPORTED_COMPENDIUM_DOCUMENTS
 } from "./constants.mjs";
-import { collectPngReferences, createId, deepClone } from "./path-utils.mjs";
+import {
+  collectPngReferences,
+  collectWebpReferences,
+  createId,
+  deepClone,
+  isSafePathSegments,
+  normalizePhysicalPath,
+  normalizeWebpPhysicalPath,
+  sanitizeJsonValue,
+  toWebpReference,
+  toWebpPhysicalPath
+} from "./path-utils.mjs";
 
 function collectionValues(collection) {
   if (!collection) return [];
@@ -16,10 +27,8 @@ function collectionValues(collection) {
 }
 
 function packageType(pack) {
-  return pack?.metadata?.packageType
-    ?? pack?.metadata?.package
-    ?? pack?.metadata?.type
-    ?? "unknown";
+  const type = pack?.metadata?.packageType;
+  return type === "world" || type === "module" || type === "system" ? type : "unknown";
 }
 
 function getEmbeddedFieldNames(document) {
@@ -92,11 +101,19 @@ function documentInfo(document, root, pack = null) {
 function scanDocument(root, document, pack, options) {
   const source = document.toObject(true);
   const skipRootFields = getEmbeddedFieldNames(document);
-  return collectPngReferences(source, {
-    richText: options.richText,
-    skipRootFields,
-    documentInfo: documentInfo(document, root, pack)
-  });
+  const info = documentInfo(document, root, pack);
+  return {
+    png: collectPngReferences(source, {
+      richText: options.richText,
+      skipRootFields,
+      documentInfo: info
+    }),
+    webp: collectWebpReferences(source, {
+      richText: options.richText,
+      skipRootFields,
+      documentInfo: info
+    })
+  };
 }
 
 function addRoot(target, document, sourceLabel, pack = null) {
@@ -119,7 +136,7 @@ function worldRoots(options) {
   addCollection(options.worldCards, game.cards, "Cards");
   addCollection(options.worldMacros, game.macros, "Macros");
   addCollection(options.worldUsers, game.users, "Users");
-  addCollection(options.chatMessages, game.messages, "ChatMessages");
+  addCollection(options.chatMessages, game.messages, "ChatMessages (loaded)");
 
   if (options.worldOther) {
     addCollection(true, game.playlists, "Playlists");
@@ -130,46 +147,40 @@ function worldRoots(options) {
   return roots;
 }
 
-async function compendiumRoots(options, skipped, onProgress) {
-  const roots = [];
-  if (!options.worldCompendiums && !options.packageCompendiums) return roots;
-
-  const packs = collectionValues(game.packs)
+function selectedCompendiumPacks(options) {
+  if (!options.worldCompendiums && !options.packageCompendiums) return [];
+  return collectionValues(game.packs)
     .filter((pack) => SUPPORTED_COMPENDIUM_DOCUMENTS.has(pack.documentName))
-    .filter((pack) => packageType(pack) === "world" ? options.worldCompendiums : options.packageCompendiums);
-
-  for (let index = 0; index < packs.length; index += 1) {
-    const pack = packs[index];
-    onProgress?.({ phase: "pack", current: index + 1, total: packs.length, label: pack.title });
-    try {
-      const documents = await pack.getDocuments();
-      for (const document of documents) addRoot(roots, document, `Compendium: ${pack.title}`, pack);
-    } catch (error) {
-      skipped.push({
-        source: pack.collection,
-        label: pack.title,
-        reason: error?.message ?? String(error)
-      });
-    }
-  }
-  return roots;
+    .filter((pack) => {
+      const type = packageType(pack);
+      if (type === "world") return options.worldCompendiums;
+      if (type === "module" || type === "system") return options.packageCompendiums;
+      return false;
+    });
 }
 
 function groupReferences(references) {
   const groups = new Map();
-  for (const ref of references) {
-    const key = ref.oldPath;
+  const platform = globalThis.process?.platform ?? globalThis.navigator?.platform ?? "";
+  const caseInsensitive = /^(?:win32|darwin)$/i.test(platform) || /(?:win|mac)/i.test(platform);
+  let caseFoldedAliases = 0;
+  for (const inputRef of references) {
+    const key = caseInsensitive ? inputRef.oldPath.toLocaleLowerCase("en-US") : inputRef.oldPath;
     if (!groups.has(key)) {
       groups.set(key, {
-        oldPath: ref.oldPath,
-        newPath: ref.newPath,
-        wildcard: /[*?]/.test(ref.oldPath),
+        oldPath: inputRef.oldPath,
+        newPath: inputRef.newPath,
+        wildcard: /[*?]/.test(inputRef.oldPath),
         refs: []
       });
-    }
-    groups.get(key).refs.push(ref);
+    } else if (groups.get(key).oldPath !== inputRef.oldPath) caseFoldedAliases += 1;
+    const group = groups.get(key);
+    group.refs.push({ ...inputRef, oldPath: group.oldPath, newPath: group.newPath });
   }
-  return [...groups.values()].sort((a, b) => a.oldPath.localeCompare(b.oldPath));
+  return {
+    entries: [...groups.values()].sort((a, b) => a.oldPath.localeCompare(b.oldPath)),
+    caseFoldedAliases
+  };
 }
 
 function makeBreakdown(references) {
@@ -183,45 +194,108 @@ function makeBreakdown(references) {
     .sort((a, b) => b.references - a.references || a.documentName.localeCompare(b.documentName));
 }
 
-export async function scanFoundry(options = {}, { onProgress } = {}) {
-  if (!game.user?.isGM) throw new Error("Сканирование доступно только GM.");
-  const normalizedOptions = { ...DEFAULT_SCAN_OPTIONS, ...deepClone(options) };
-  const skipped = [];
-  const roots = worldRoots(normalizedOptions);
-  roots.push(...await compendiumRoots(normalizedOptions, skipped, onProgress));
+async function yieldToBrowser() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
-  const rootSeen = new Set();
-  const references = [];
-  let documentCount = 0;
+async function scanRootEntry(rootEntry, context) {
+  const { rootSeen, references, webpReferences, skipped, options, progress } = context;
+  if (rootSeen.has(rootEntry.document.uuid)) return 0;
+  rootSeen.add(rootEntry.document.uuid);
+  progress?.(rootEntry.document);
 
-  for (let index = 0; index < roots.length; index += 1) {
-    const rootEntry = roots[index];
-    if (rootSeen.has(rootEntry.document.uuid)) continue;
-    rootSeen.add(rootEntry.document.uuid);
-    onProgress?.({
-      phase: "document",
-      current: index + 1,
-      total: roots.length,
-      label: rootEntry.document.name ?? rootEntry.document.id
-    });
-
-    for (const document of iterateDocumentTree(rootEntry.document)) {
-      documentCount += 1;
-      try {
-        references.push(...scanDocument(rootEntry.document, document, rootEntry.pack, normalizedOptions));
-      } catch (error) {
-        skipped.push({
-          source: document.uuid,
-          label: document.name ?? document.id,
-          reason: error?.message ?? String(error)
-        });
-      }
+  let count = 0;
+  for (const document of iterateDocumentTree(rootEntry.document)) {
+    count += 1;
+    try {
+      const found = scanDocument(rootEntry.document, document, rootEntry.pack, options);
+      references.push(...found.png);
+      webpReferences.push(...found.webp);
+    } catch (error) {
+      skipped.push({
+        source: document.uuid,
+        label: document.name ?? document.id,
+        reason: error?.message ?? String(error)
+      });
     }
   }
+  return count;
+}
 
-  const entries = groupReferences(references);
+export async function scanFoundry(options = {}, { onProgress, signal } = {}) {
+  if (!game.user?.isGM) throw new Error("Сканирование доступно только GM.");
+  const normalizedOptions = sanitizeScanOptions(deepClone(options));
+  const skipped = [];
+  const rootSeen = new Set();
+  const references = [];
+  const webpReferences = [];
+  let documentCount = 0;
+  let progressCounter = 0;
+
+  const roots = worldRoots(normalizedOptions);
+  for (let index = 0; index < roots.length; index += 1) {
+    if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+    const rootEntry = roots[index];
+    documentCount += await scanRootEntry(rootEntry, {
+      rootSeen,
+      references,
+      webpReferences,
+      skipped,
+      options: normalizedOptions,
+      progress: (document) => onProgress?.({
+        phase: "document",
+        current: index + 1,
+        total: roots.length,
+        label: document.name ?? document.id
+      })
+    });
+    progressCounter += 1;
+    if (progressCounter % 20 === 0) await yieldToBrowser();
+  }
+
+  const packs = selectedCompendiumPacks(normalizedOptions);
+  for (let packIndex = 0; packIndex < packs.length; packIndex += 1) {
+    if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+    const pack = packs[packIndex];
+    onProgress?.({ phase: "pack", current: packIndex + 1, total: packs.length, label: pack.title });
+    try {
+      const documents = await pack.getDocuments();
+      for (let documentIndex = 0; documentIndex < documents.length; documentIndex += 1) {
+        if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+        const document = documents[documentIndex];
+        const rootEntry = { document, sourceLabel: `Compendium: ${pack.title}`, pack };
+        documentCount += await scanRootEntry(rootEntry, {
+          rootSeen,
+          references,
+          webpReferences,
+          skipped,
+          options: normalizedOptions,
+          progress: (currentDocument) => onProgress?.({
+            phase: "pack-document",
+            current: documentIndex + 1,
+            total: documents.length,
+            label: `${pack.title}: ${currentDocument.name ?? currentDocument.id}`
+          })
+        });
+        if (documentIndex % 20 === 19) await yieldToBrowser();
+      }
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      skipped.push({
+        source: pack.collection,
+        label: pack.title,
+        reason: error?.message ?? String(error)
+      });
+    }
+    await yieldToBrowser();
+  }
+
+  const grouped = groupReferences(references);
+  const groupedWebp = groupReferences(webpReferences);
+  const entries = grouped.entries;
+  const webpEntries = groupedWebp.entries;
   const manifestId = createId();
-  const manifest = {
+  return {
     type: "fbl-webp-migrator-manifest",
     schemaVersion: MANIFEST_SCHEMA_VERSION,
     version: MODULE_VERSION,
@@ -232,11 +306,25 @@ export async function scanFoundry(options = {}, { onProgress } = {}) {
     systemVersion: game.system?.version ?? null,
     worldId: game.world?.id ?? null,
     worldTitle: game.world?.title ?? null,
+    capabilities: {
+      pngReferenceScan: true,
+      webpReferenceScan: true,
+      consistencyAudit: true
+    },
     options: normalizedOptions,
     notes: [
       "oldPath/newPath are physical paths relative to Foundry UserData/Data.",
       "Reference data remains authoritative inside this manifest. Conversion reports never authorize document fields.",
-      "Cleanup is safe only for the scopes selected during this scan."
+      "Cleanup is safe only for the scopes selected during this scan.",
+      normalizedOptions.chatMessages
+        ? "Chat Messages coverage is limited to messages currently loaded by Foundry."
+        : "Chat Messages were not scanned.",
+      grouped.caseFoldedAliases
+        ? `Merged ${grouped.caseFoldedAliases} path aliases that differ only by letter case on a case-insensitive platform.`
+        : "No case-folded PNG path aliases were merged.",
+      groupedWebp.caseFoldedAliases
+        ? `Merged ${groupedWebp.caseFoldedAliases} WEBP path aliases that differ only by letter case on a case-insensitive platform.`
+        : "No case-folded WEBP path aliases were merged."
     ],
     skipped,
     summary: {
@@ -244,20 +332,156 @@ export async function scanFoundry(options = {}, { onProgress } = {}) {
       scannedDocumentsIncludingEmbedded: documentCount,
       uniquePngPaths: entries.length,
       documentReferences: references.length,
-      wildcardPaths: entries.filter((entry) => entry.wildcard).length,
+      uniqueWebpPaths: webpEntries.length,
+      webpDocumentReferences: webpReferences.length,
+      wildcardPaths: new Set([...entries, ...webpEntries].filter((entry) => entry.wildcard).map((entry) => entry.oldPath)).size,
       skippedSources: skipped.length,
+      caseFoldedAliases: grouped.caseFoldedAliases,
+      webpCaseFoldedAliases: groupedWebp.caseFoldedAliases,
       byDocumentType: makeBreakdown(references)
     },
-    entries
+    entries,
+    webpEntries
   };
-
-  return manifest;
 }
 
 export function sanitizeScanOptions(options = {}) {
   const output = {};
-  for (const [key, fallback] of Object.entries(DEFAULT_SCAN_OPTIONS)) output[key] = typeof options[key] === "boolean" ? options[key] : fallback;
+  for (const [key, fallback] of Object.entries(DEFAULT_SCAN_OPTIONS)) {
+    output[key] = typeof options[key] === "boolean" ? options[key] : fallback;
+  }
   return output;
+}
+
+function sanitizeImportedRef(ref, entry, sourceFormat = "png") {
+  if (!ref || typeof ref !== "object") return null;
+  if (typeof ref.uuid !== "string" || !isSafePathSegments(ref.fieldPath)) return null;
+  if (ref.fieldPath[0] !== ref.rootField || typeof ref.rootField !== "string") return null;
+  if (ref.mode !== "exact" && ref.mode !== "text") return null;
+  if (typeof ref.oldValue !== "string" || typeof ref.newValue !== "string" || ref.oldValue === ref.newValue) return null;
+  if (ref.oldPath !== entry.oldPath || ref.newPath !== entry.newPath) return null;
+  if (normalizePhysicalPath(ref.oldValue) !== entry.oldPath) return null;
+  if (normalizeWebpPhysicalPath(ref.newValue) !== entry.newPath) return null;
+  if (toWebpReference(ref.oldValue) !== ref.newValue) return null;
+  const normalizedSourceFormat = ref.sourceFormat === "webp" ? "webp" : "png";
+  if (normalizedSourceFormat !== sourceFormat) return null;
+  return {
+    uuid: ref.uuid,
+    documentId: typeof ref.documentId === "string" ? ref.documentId : null,
+    documentName: typeof ref.documentName === "string" ? ref.documentName : null,
+    documentLabel: typeof ref.documentLabel === "string" ? ref.documentLabel : null,
+    rootUuid: typeof ref.rootUuid === "string" ? ref.rootUuid : ref.uuid,
+    rootDocumentName: typeof ref.rootDocumentName === "string" ? ref.rootDocumentName : null,
+    rootLabel: typeof ref.rootLabel === "string" ? ref.rootLabel : null,
+    pack: typeof ref.pack === "string" ? ref.pack : null,
+    packTitle: typeof ref.packTitle === "string" ? ref.packTitle : null,
+    packageType: ["world", "module", "system", "unknown"].includes(ref.packageType) ? ref.packageType : "unknown",
+    sourceFormat,
+    mode: ref.mode,
+    fieldPath: deepClone(ref.fieldPath),
+    fieldLabel: typeof ref.fieldLabel === "string" ? ref.fieldLabel : null,
+    rootField: ref.rootField,
+    oldValue: ref.oldValue,
+    newValue: ref.newValue,
+    oldPath: entry.oldPath,
+    newPath: entry.newPath
+  };
+}
+
+export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null) {
+  if (!raw || raw.type !== "fbl-webp-migrator-manifest") throw new Error("Это не manifest FBL WebP Migrator.");
+  if (!raw.manifestId || typeof raw.manifestId !== "string") throw new Error("Manifest не содержит manifestId.");
+  if (raw.worldId !== currentWorldId) throw new Error("Manifest относится к другому миру.");
+
+  const ignored = [];
+  const sanitizeEntries = (inputs, sourceFormat) => {
+    const map = new Map();
+    for (const input of inputs ?? []) {
+      const oldPath = normalizePhysicalPath(input?.oldPath);
+      const newPath = toWebpPhysicalPath(input?.oldPath);
+      if (!oldPath || !newPath || input?.newPath !== newPath) {
+        ignored.push({ oldPath: input?.oldPath ?? null, sourceFormat, reason: "Некорректная пара oldPath/newPath." });
+        continue;
+      }
+      if (!map.has(oldPath)) {
+        map.set(oldPath, {
+          oldPath,
+          newPath,
+          wildcard: /[*?]/.test(oldPath),
+          refs: [],
+          dedupe: new Set()
+        });
+      }
+      const entry = map.get(oldPath);
+      let accepted = 0;
+      for (const inputRef of input.refs ?? []) {
+        const ref = sanitizeImportedRef(inputRef, entry, sourceFormat);
+        if (!ref) continue;
+        const key = `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}`;
+        if (entry.dedupe.has(key)) continue;
+        entry.dedupe.add(key);
+        entry.refs.push(ref);
+        accepted += 1;
+      }
+      if (!accepted) ignored.push({ oldPath, sourceFormat, reason: "В записи нет новых допустимых ссылок." });
+    }
+    return [...map.values()]
+      .filter((entry) => entry.refs.length)
+      .map(({ dedupe, ...entry }) => entry)
+      .sort((a, b) => a.oldPath.localeCompare(b.oldPath));
+  };
+
+  const entries = sanitizeEntries(raw.entries, "png");
+  const webpEntries = sanitizeEntries(raw.webpEntries, "webp");
+
+  const references = entries.flatMap((entry) => entry.refs);
+  const webpReferences = webpEntries.flatMap((entry) => entry.refs);
+  return {
+    type: raw.type,
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    version: typeof raw.version === "string" ? raw.version : MODULE_VERSION,
+    manifestId: raw.manifestId,
+    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : null,
+    foundryVersion: typeof raw.foundryVersion === "string" ? raw.foundryVersion : null,
+    systemId: typeof raw.systemId === "string" ? raw.systemId : null,
+    systemVersion: typeof raw.systemVersion === "string" ? raw.systemVersion : null,
+    worldId: currentWorldId,
+    worldTitle: typeof raw.worldTitle === "string" ? raw.worldTitle : game.world?.title ?? null,
+    capabilities: {
+      pngReferenceScan: raw.capabilities?.pngReferenceScan === true || Array.isArray(raw.entries),
+      webpReferenceScan: Number(raw.schemaVersion) >= 4
+        && raw.capabilities?.webpReferenceScan === true
+        && Array.isArray(raw.webpEntries),
+      consistencyAudit: Number(raw.schemaVersion) >= 4
+        && raw.capabilities?.consistencyAudit === true
+        && raw.capabilities?.webpReferenceScan === true
+        && Array.isArray(raw.webpEntries)
+    },
+    options: sanitizeScanOptions(raw.options ?? {}),
+    notes: Array.isArray(raw.notes) ? raw.notes.filter((note) => typeof note === "string").slice(0, 20) : [],
+    skipped: Array.isArray(raw.skipped)
+      ? raw.skipped
+        .filter((item) => item && typeof item === "object")
+        .slice(0, 5000)
+        .map((item) => sanitizeJsonValue(item))
+      : [],
+    ignored,
+    summary: {
+      scannedRootDocuments: Number.isFinite(raw.summary?.scannedRootDocuments) ? raw.summary.scannedRootDocuments : null,
+      scannedDocumentsIncludingEmbedded: Number.isFinite(raw.summary?.scannedDocumentsIncludingEmbedded) ? raw.summary.scannedDocumentsIncludingEmbedded : null,
+      uniquePngPaths: entries.length,
+      documentReferences: references.length,
+      uniqueWebpPaths: webpEntries.length,
+      webpDocumentReferences: webpReferences.length,
+      wildcardPaths: new Set([...entries, ...webpEntries].filter((entry) => entry.wildcard).map((entry) => entry.oldPath)).size,
+      skippedSources: Array.isArray(raw.skipped) ? raw.skipped.length : 0,
+      caseFoldedAliases: Number.isFinite(raw.summary?.caseFoldedAliases) ? raw.summary.caseFoldedAliases : 0,
+      webpCaseFoldedAliases: Number.isFinite(raw.summary?.webpCaseFoldedAliases) ? raw.summary.webpCaseFoldedAliases : 0,
+      byDocumentType: makeBreakdown(references)
+    },
+    entries,
+    webpEntries
+  };
 }
 
 export function getPackPackageType(pack) {
