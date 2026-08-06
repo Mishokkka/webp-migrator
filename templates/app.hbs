@@ -1,0 +1,132 @@
+<section class="fwm-app" data-module-id="fbl-webp-migrator">
+  <header class="fwm-header">
+    <div>
+      <h2>PNG → WebP Migrator</h2>
+      <p>Foundry сканирует и меняет ссылки. Внешний Node-скрипт вызывает <code>cwebp</code>, проверяет WEBP и удаляет PNG только по migration report.</p>
+    </div>
+  </header>
+
+  <section class="fwm-panel">
+    <h3>1. Области сканирования</h3>
+    <div class="fwm-option-grid">
+      {{#each optionRows}}
+      <label class="fwm-option" title="{{hint}}">
+        <input type="checkbox" name="{{key}}" {{#if checked}}checked{{/if}} {{#if ../busy}}disabled{{/if}}>
+        <span><strong>{{label}}</strong><small>{{hint}}</small></span>
+      </label>
+      {{/each}}
+    </div>
+    <div class="fwm-actions">
+      <button type="button" data-action="scan" {{#if busy}}disabled{{/if}}><i class="fas fa-search"></i> Сканировать</button>
+      <button type="button" data-action="exportManifest" {{#unless canExportManifest}}disabled{{/unless}}><i class="fas fa-file-export"></i> Экспорт manifest</button>
+      <button type="button" data-action="reset" {{#if busy}}disabled{{/if}}><i class="fas fa-rotate-left"></i> Сбросить</button>
+    </div>
+  </section>
+
+  <section class="fwm-panel">
+    <h3>2. Конвертация через cwebp</h3>
+    <pre class="fwm-code">node tools/convert-cwebp.js --manifest "D:\path\manifest.json" --data "C:\Users\...\FoundryVTT\Data" --cwebp "D:\libwebp\bin\cwebp.exe" --quality 85</pre>
+    <p class="fwm-muted">Скрипт поддерживает обычные пути и wildcard <code>*</code>/<code>?</code>. APNG пропускается, чтобы не уничтожать анимацию.</p>
+    <label class="fwm-file">
+      <span>Импорт conversion-report.json</span>
+      <input type="file" name="conversionReportFile" accept="application/json,.json" {{#if busy}}disabled{{/if}}>
+    </label>
+    <div class="fwm-actions">
+      <button type="button" data-action="assumeConverted" {{#unless canAssumeConverted}}disabled{{/unless}}><i class="fas fa-link"></i> WEBP уже готовы</button>
+      <button type="button" data-action="applyReport" {{#unless canApplyReport}}disabled{{/unless}}><i class="fas fa-check"></i> Применить пути</button>
+      <button type="button" data-action="exportMigrationReport" {{#unless canExportMigrationReport}}disabled{{/unless}}><i class="fas fa-file-export"></i> Экспорт migration report</button>
+      <button type="button" data-action="rollback" {{#unless canRollback}}disabled{{/unless}}><i class="fas fa-rotate-left"></i> Откатить пути</button>
+    </div>
+  </section>
+
+  <section class="fwm-status {{#if lastError}}is-error{{/if}}" aria-live="polite">
+    <strong>Статус:</strong> {{status}}
+    {{#if lastError}}<div class="fwm-error-text">{{lastError}}</div>{{/if}}
+  </section>
+
+  {{#if manifestSummary}}
+  <section class="fwm-panel">
+    <h3>Manifest</h3>
+    <div class="fwm-summary">
+      <span>Корневых документов: <strong>{{manifestSummary.scannedRootDocuments}}</strong></span>
+      <span>Всего с embedded: <strong>{{manifestSummary.scannedDocumentsIncludingEmbedded}}</strong></span>
+      <span>Уникальных PNG: <strong>{{manifestSummary.uniquePngPaths}}</strong></span>
+      <span>Ссылок: <strong>{{manifestSummary.documentReferences}}</strong></span>
+      <span>Wildcard: <strong>{{manifestSummary.wildcardPaths}}</strong></span>
+      <span>Ошибок чтения: <strong>{{manifestSummary.skippedSources}}</strong></span>
+    </div>
+    <div class="fwm-table-wrap">
+      <table>
+        <thead><tr><th>PNG</th><th>WEBP</th><th>Refs</th><th>Wildcard</th></tr></thead>
+        <tbody>
+          {{#each manifestPreview}}
+          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{refCount}}</td><td>{{wildcard}}</td></tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {{/if}}
+
+  {{#if conversionSummary}}
+  <section class="fwm-panel">
+    <h3>Conversion report</h3>
+    <div class="fwm-summary">
+      <span>Converted: <strong>{{conversionSummary.converted}}</strong></span>
+      <span>Exists: <strong>{{conversionSummary.exists}}</strong></span>
+      <span>WEBP без PNG: <strong>{{conversionSummary.existsMissingOld}}</strong></span>
+      <span>Failed: <strong>{{conversionSummary.failed}}</strong></span>
+      <span>Skipped: <strong>{{conversionSummary.skipped}}</strong></span>
+      <span>Сэкономлено: <strong>{{conversionSummary.totalSavedPercent}}%</strong></span>
+    </div>
+    <div class="fwm-table-wrap">
+      <table>
+        <thead><tr><th>PNG</th><th>Status</th><th>Old</th><th>New</th><th>Saved</th></tr></thead>
+        <tbody>
+          {{#each conversionPreview}}
+          <tr><td>{{oldPath}}</td><td>{{status}}</td><td>{{oldSize}}</td><td>{{newSize}}</td><td>{{savedPercent}}</td></tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {{/if}}
+
+  {{#if migrationSummary}}
+  <section class="fwm-panel">
+    <h3>Migration report</h3>
+    <div class="fwm-summary">
+      <span>Готовы к cleanup: <strong>{{migrationSummary.fullyMigratedPngPaths}}</strong></span>
+      <span>Пропущено путей: <strong>{{migrationSummary.skippedPngPaths}}</strong></span>
+      <span>Изменено ссылок: <strong>{{migrationSummary.changedReferences}}</strong></span>
+      <span>Уже были WEBP: <strong>{{migrationSummary.alreadyMigratedReferences}}</strong></span>
+      <span>Stale: <strong>{{migrationSummary.staleReferences}}</strong></span>
+      <span>Ошибки: <strong>{{migrationSummary.errors}}</strong></span>
+    </div>
+    <p class="fwm-muted">Cleanup удалит только PNG из списка <code>migrated</code>. Это гарантирует целостность только внутри областей, отмеченных при сканировании.</p>
+    <pre class="fwm-code">node tools/convert-cwebp.js --cleanup "D:\path\migration-report.json" --data "C:\Users\...\FoundryVTT\Data" --delete</pre>
+    <div class="fwm-table-wrap">
+      <table>
+        <thead><tr><th>PNG</th><th>WEBP</th><th>Refs</th><th>Changed</th><th>Already</th></tr></thead>
+        <tbody>
+          {{#each migrationPreview}}
+          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{refCount}}</td><td>{{changed}}</td><td>{{already}}</td></tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {{/if}}
+
+  {{#if rollbackSummary}}
+  <section class="fwm-panel">
+    <h3>Откат</h3>
+    <div class="fwm-summary">
+      <span>Возвращено: <strong>{{rollbackSummary.changed}}</strong></span>
+      <span>Уже PNG: <strong>{{rollbackSummary.already}}</strong></span>
+      <span>Stale: <strong>{{rollbackSummary.stale}}</strong></span>
+      <span>Ошибки: <strong>{{rollbackSummary.errors}}</strong></span>
+    </div>
+  </section>
+  {{/if}}
+</section>
