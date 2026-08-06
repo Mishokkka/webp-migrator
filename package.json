@@ -1,0 +1,8 @@
+{
+  "name": "fbl-webp-migrator",
+  "private": true,
+  "version": "0.2.1",
+  "scripts": {
+    "check": "node --test tests/*.test.mjs && node --check tools/convert-cwebp.js"
+  }
+}
