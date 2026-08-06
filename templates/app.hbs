@@ -1,84 +1,186 @@
-<section class="fwm-app" data-module-id="fbl-webp-migrator">
+<section class="fwm-root" data-module-id="{{moduleId}}">
   <header class="fwm-header">
-    <div>
-      <h2>PNG → WebP Migrator</h2>
-      <p>Foundry сканирует и меняет ссылки. Внешний Node-скрипт вызывает <code>cwebp</code>, проверяет WEBP и удаляет PNG только по migration report.</p>
-    </div>
+    <h2>{{localize "FWM.Header.Title"}}</h2>
+    <p>{{localize "FWM.Header.Description"}}</p>
+    <ol class="fwm-workflow">
+      <li>{{localize "FWM.Workflow.Scan"}}</li>
+      <li>{{localize "FWM.Workflow.Convert"}}</li>
+      <li>{{localize "FWM.Workflow.Apply"}}</li>
+      <li>{{localize "FWM.Workflow.Cleanup"}}</li>
+    </ol>
   </header>
 
+  <section class="fwm-status {{#if lastError}}is-error{{/if}}" data-fwm-status aria-live="polite" aria-atomic="true">
+    <div class="fwm-status-line">
+      <strong>{{localize "FWM.Common.Status"}}</strong>
+      <span data-fwm-status-text>{{status}}</span>
+      {{#if canCancel}}
+      <button type="button" class="fwm-cancel-button" data-action="cancel"><i class="fas fa-stop"></i> {{localize "FWM.Actions.Stop"}}</button>
+      {{/if}}
+    </div>
+    <div class="fwm-error-text" data-fwm-error-text {{#unless lastError}}hidden{{/unless}}>{{lastError}}</div>
+  </section>
+
   <section class="fwm-panel">
-    <h3>1. Области сканирования</h3>
+    <h3>1. {{localize "FWM.Sections.Scan"}}</h3>
+    <p class="fwm-muted">{{localize "FWM.Sections.ScanHint"}}</p>
     <div class="fwm-option-grid">
       {{#each optionRows}}
-      <label class="fwm-option" title="{{hint}}">
+      <label class="fwm-option {{#if dangerous}}is-dangerous{{/if}}">
         <input type="checkbox" name="{{key}}" {{#if checked}}checked{{/if}} {{#if ../busy}}disabled{{/if}}>
         <span><strong>{{label}}</strong><small>{{hint}}</small></span>
       </label>
       {{/each}}
     </div>
+    <div class="fwm-import-grid">
+      <label class="fwm-file">
+        <span>{{localize "FWM.Files.ImportManifest"}}</span>
+        <input type="file" name="manifestFile" accept="application/json,.json" {{#if busy}}disabled{{/if}}>
+      </label>
+      <label class="fwm-file">
+        <span>{{localize "FWM.Files.ImportMigration"}}</span>
+        <input type="file" name="migrationReportFile" accept="application/json,.json" {{#if busy}}disabled{{/if}}>
+      </label>
+    </div>
     <div class="fwm-actions">
-      <button type="button" data-action="scan" {{#if busy}}disabled{{/if}}><i class="fas fa-search"></i> Сканировать</button>
-      <button type="button" data-action="exportManifest" {{#unless canExportManifest}}disabled{{/unless}}><i class="fas fa-file-export"></i> Экспорт manifest</button>
-      <button type="button" data-action="reset" {{#if busy}}disabled{{/if}}><i class="fas fa-rotate-left"></i> Сбросить</button>
+      <button type="button" data-action="scan" {{#if busy}}disabled{{/if}}><i class="fas fa-search"></i> {{localize "FWM.Actions.Scan"}}</button>
+      <button type="button" data-action="exportManifest" {{#unless canExportManifest}}disabled{{/unless}}><i class="fas fa-file-export"></i> {{localize "FWM.Actions.ExportManifest"}}</button>
+      <button type="button" data-action="reset" {{#if busy}}disabled{{/if}}><i class="fas fa-rotate-left"></i> {{localize "FWM.Actions.Reset"}}</button>
     </div>
   </section>
 
   <section class="fwm-panel">
-    <h3>2. Конвертация через cwebp</h3>
-    <pre class="fwm-code">node tools/convert-cwebp.js --manifest "D:\path\manifest.json" --data "C:\Users\...\FoundryVTT\Data" --cwebp "D:\libwebp\bin\cwebp.exe" --quality 85</pre>
-    <p class="fwm-muted">Скрипт поддерживает обычные пути и wildcard <code>*</code>/<code>?</code>. APNG пропускается, чтобы не уничтожать анимацию.</p>
+    <h3>2. {{localize "FWM.Sections.Consistency"}}</h3>
+    <p class="fwm-muted">{{localize "FWM.Sections.ConsistencyHint"}}</p>
+    <pre class="fwm-code">{{consistencyCommand}}</pre>
     <label class="fwm-file">
-      <span>Импорт conversion-report.json</span>
+      <span>{{localize "FWM.Files.ImportConsistency"}}</span>
+      <input type="file" name="consistencyReportFile" accept="application/json,.json" {{#if busy}}disabled{{/if}}>
+    </label>
+    <div class="fwm-actions">
+      <button type="button" data-action="applyConsistency" {{#unless canApplyConsistency}}disabled{{/unless}}><i class="fas fa-screwdriver-wrench"></i> {{localize "FWM.Actions.ApplyConsistency"}}</button>
+    </div>
+  </section>
+
+  <section class="fwm-panel">
+    <h3>3. {{localize "FWM.Sections.Convert"}}</h3>
+    <pre class="fwm-code">{{conversionCommand}}</pre>
+    <p class="fwm-muted">{{localize "FWM.Sections.ConvertHint"}}</p>
+    <label class="fwm-file">
+      <span>{{localize "FWM.Files.ImportConversion"}}</span>
       <input type="file" name="conversionReportFile" accept="application/json,.json" {{#if busy}}disabled{{/if}}>
     </label>
     <div class="fwm-actions">
-      <button type="button" data-action="assumeConverted" {{#unless canAssumeConverted}}disabled{{/unless}}><i class="fas fa-link"></i> WEBP уже готовы</button>
-      <button type="button" data-action="applyReport" {{#unless canApplyReport}}disabled{{/unless}}><i class="fas fa-check"></i> Применить пути</button>
-      <button type="button" data-action="exportMigrationReport" {{#unless canExportMigrationReport}}disabled{{/unless}}><i class="fas fa-file-export"></i> Экспорт migration report</button>
-      <button type="button" data-action="rollback" {{#unless canRollback}}disabled{{/unless}}><i class="fas fa-rotate-left"></i> Откатить пути</button>
+      <button type="button" data-action="assumeConverted" {{#unless canAssumeConverted}}disabled{{/unless}}><i class="fas fa-link"></i> {{localize "FWM.Actions.AssumeConverted"}}</button>
+      <button type="button" data-action="applyReport" {{#unless canApplyReport}}disabled{{/unless}}><i class="fas fa-check"></i> {{localize "FWM.Actions.ApplyPaths"}}</button>
+      <button type="button" data-action="exportMigrationReport" {{#unless canExportMigrationReport}}disabled{{/unless}}><i class="fas fa-file-export"></i> {{localize "FWM.Actions.ExportMigration"}}</button>
+      <button type="button" data-action="rollback" {{#unless canRollback}}disabled{{/unless}}><i class="fas fa-rotate-left"></i> {{localize "FWM.Actions.Rollback"}}</button>
     </div>
   </section>
 
-  <section class="fwm-status {{#if lastError}}is-error{{/if}}" aria-live="polite">
-    <strong>Статус:</strong> {{status}}
-    {{#if lastError}}<div class="fwm-error-text">{{lastError}}</div>{{/if}}
+  {{#if migrationSummary}}
+  <section class="fwm-panel fwm-cleanup-panel">
+    <h3>4. {{localize "FWM.Sections.Cleanup"}}</h3>
+    <p class="fwm-warning">{{localize "FWM.Sections.CleanupWarning"}}</p>
+    <h4>{{localize "FWM.Cleanup.DryRun"}}</h4>
+    <pre class="fwm-code">{{cleanupCommand}}</pre>
+    <h4>{{localize "FWM.Cleanup.Quarantine"}}</h4>
+    <pre class="fwm-code">{{quarantineCommand}}</pre>
+    <h4>{{localize "FWM.Cleanup.Restore"}}</h4>
+    <pre class="fwm-code">{{restoreCommand}}</pre>
+    <p class="fwm-muted">{{localize "FWM.Cleanup.PermanentNote"}}</p>
   </section>
+  {{/if}}
 
   {{#if manifestSummary}}
   <section class="fwm-panel">
-    <h3>Manifest</h3>
+    <h3>{{localize "FWM.Reports.Manifest"}}</h3>
     <div class="fwm-summary">
-      <span>Корневых документов: <strong>{{manifestSummary.scannedRootDocuments}}</strong></span>
-      <span>Всего с embedded: <strong>{{manifestSummary.scannedDocumentsIncludingEmbedded}}</strong></span>
-      <span>Уникальных PNG: <strong>{{manifestSummary.uniquePngPaths}}</strong></span>
-      <span>Ссылок: <strong>{{manifestSummary.documentReferences}}</strong></span>
-      <span>Wildcard: <strong>{{manifestSummary.wildcardPaths}}</strong></span>
-      <span>Ошибок чтения: <strong>{{manifestSummary.skippedSources}}</strong></span>
+      <span>{{localize "FWM.Summary.RootDocuments"}} <strong>{{manifestSummary.scannedRootDocuments}}</strong></span>
+      <span>{{localize "FWM.Summary.AllDocuments"}} <strong>{{manifestSummary.scannedDocumentsIncludingEmbedded}}</strong></span>
+      <span>{{localize "FWM.Summary.UniquePng"}} <strong>{{manifestSummary.uniquePngPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.References"}} <strong>{{manifestSummary.documentReferences}}</strong></span>
+      <span>{{localize "FWM.Summary.UniqueWebp"}} <strong>{{manifestSummary.uniqueWebpPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.WebpReferences"}} <strong>{{manifestSummary.webpDocumentReferences}}</strong></span>
+      <span>{{localize "FWM.Summary.Wildcards"}} <strong>{{manifestSummary.wildcardPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.ReadErrors"}} <strong>{{manifestSummary.skippedSources}}</strong></span>
     </div>
+    {{#if manifestPreviewMeta.total}}
+    <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{manifestPreviewMeta.shown}} / {{manifestPreviewMeta.total}}</p>
     <div class="fwm-table-wrap">
       <table>
-        <thead><tr><th>PNG</th><th>WEBP</th><th>Refs</th><th>Wildcard</th></tr></thead>
+        <thead><tr><th>{{localize "FWM.Common.CurrentFormat"}}</th><th>PNG</th><th>WEBP</th><th>Refs</th><th>Wildcard</th></tr></thead>
         <tbody>
           {{#each manifestPreview}}
-          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{refCount}}</td><td>{{wildcard}}</td></tr>
+          <tr><td>{{sourceFormat}}</td><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{refCount}}</td><td>{{wildcard}}</td></tr>
           {{/each}}
         </tbody>
       </table>
     </div>
+    {{/if}}
+    {{#if manifestIssuesMeta.total}}
+    <details class="fwm-issues" open>
+      <summary>{{localize "FWM.Common.Issues"}}: {{manifestIssuesMeta.total}}</summary>
+      <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{manifestIssuesMeta.shown}} / {{manifestIssuesMeta.total}}</p>
+      <div class="fwm-table-wrap fwm-issues-table"><table><thead><tr><th>{{localize "FWM.Common.Scope"}}</th><th>Status</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead><tbody>
+        {{#each manifestIssues}}<tr><td>{{scope}}</td><td>{{status}}</td><td>{{detail}}</td></tr>{{/each}}
+      </tbody></table></div>
+    </details>
+    {{/if}}
+  </section>
+  {{/if}}
+
+  {{#if consistencySummary}}
+  <section class="fwm-panel">
+    <h3>{{localize "FWM.Reports.Consistency"}}</h3>
+    <div class="fwm-summary">
+      <span>{{localize "FWM.Summary.AuditPairs"}} <strong>{{consistencySummary.pairs}}</strong></span>
+      <span>{{localize "FWM.Summary.AuditFiles"}} <strong>{{consistencySummary.concreteFiles}}</strong></span>
+      <span>{{localize "FWM.Summary.ToWebp"}} <strong>{{consistencySummary.forwardRepairPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.ToPng"}} <strong>{{consistencySummary.reverseRepairPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.AuditUnresolved"}} <strong>{{consistencySummary.unresolvedPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.Ignored"}} <strong>{{consistencySummary.ignored}}</strong></span>
+    </div>
+    {{#if consistencyPreviewMeta.total}}
+    <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{consistencyPreviewMeta.shown}} / {{consistencyPreviewMeta.total}}</p>
+    <div class="fwm-table-wrap">
+      <table>
+        <thead><tr><th>PNG</th><th>WEBP</th><th>Status</th><th>PNG refs</th><th>WEBP refs</th><th>Files</th><th>{{localize "FWM.Consistency.Repair"}}</th></tr></thead>
+        <tbody>
+          {{#each consistencyPreview}}
+          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{status}}</td><td>{{pngRefs}}</td><td>{{webpRefs}}</td><td>{{files}}</td><td>{{repair}}</td></tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+    {{/if}}
+    {{#if consistencyIssuesMeta.total}}
+    <details class="fwm-issues" open>
+      <summary>{{localize "FWM.Common.Issues"}}: {{consistencyIssuesMeta.total}}</summary>
+      <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{consistencyIssuesMeta.shown}} / {{consistencyIssuesMeta.total}}</p>
+      <div class="fwm-table-wrap fwm-issues-table"><table><thead><tr><th>{{localize "FWM.Common.Scope"}}</th><th>Status</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead><tbody>
+        {{#each consistencyIssues}}<tr><td>{{scope}}</td><td>{{status}}</td><td>{{detail}}</td></tr>{{/each}}
+      </tbody></table></div>
+    </details>
+    {{/if}}
   </section>
   {{/if}}
 
   {{#if conversionSummary}}
   <section class="fwm-panel">
-    <h3>Conversion report</h3>
+    <h3>{{localize "FWM.Reports.Conversion"}}</h3>
     <div class="fwm-summary">
-      <span>Converted: <strong>{{conversionSummary.converted}}</strong></span>
-      <span>Exists: <strong>{{conversionSummary.exists}}</strong></span>
-      <span>WEBP без PNG: <strong>{{conversionSummary.existsMissingOld}}</strong></span>
-      <span>Failed: <strong>{{conversionSummary.failed}}</strong></span>
-      <span>Skipped: <strong>{{conversionSummary.skipped}}</strong></span>
-      <span>Сэкономлено: <strong>{{conversionSummary.totalSavedPercent}}%</strong></span>
+      <span>{{localize "FWM.Summary.Converted"}} <strong>{{conversionSummary.converted}}</strong></span>
+      <span>{{localize "FWM.Summary.Exists"}} <strong>{{conversionSummary.exists}}</strong></span>
+      <span>{{localize "FWM.Summary.ExistsMissingOld"}} <strong>{{conversionSummary.existsMissingOld}}</strong></span>
+      <span>{{localize "FWM.Summary.Assumed"}} <strong>{{conversionSummary.assumed}}</strong></span>
+      <span>{{localize "FWM.Summary.Failed"}} <strong>{{conversionSummary.failed}}</strong></span>
+      <span>{{localize "FWM.Summary.Skipped"}} <strong>{{conversionSummary.skipped}}</strong></span>
+      <span>{{localize "FWM.Summary.Larger"}} <strong>{{conversionSummary.larger}}</strong></span>
+      <span>{{localize "FWM.Summary.Saved"}} <strong>{{conversionSummary.totalSavedPercent}}%</strong></span>
     </div>
+    {{#if conversionPreviewMeta.total}}
+    <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{conversionPreviewMeta.shown}} / {{conversionPreviewMeta.total}}</p>
     <div class="fwm-table-wrap">
       <table>
         <thead><tr><th>PNG</th><th>Status</th><th>Old</th><th>New</th><th>Saved</th></tr></thead>
@@ -89,44 +191,76 @@
         </tbody>
       </table>
     </div>
+    {{/if}}
+    {{#if conversionIssuesMeta.total}}
+    <details class="fwm-issues" open>
+      <summary>{{localize "FWM.Common.Issues"}}: {{conversionIssuesMeta.total}}</summary>
+      <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{conversionIssuesMeta.shown}} / {{conversionIssuesMeta.total}}</p>
+      <div class="fwm-table-wrap fwm-issues-table"><table><thead><tr><th>{{localize "FWM.Common.Scope"}}</th><th>Status</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead><tbody>
+        {{#each conversionIssues}}<tr><td>{{scope}}</td><td>{{status}}</td><td>{{detail}}</td></tr>{{/each}}
+      </tbody></table></div>
+    </details>
+    {{/if}}
   </section>
   {{/if}}
 
   {{#if migrationSummary}}
   <section class="fwm-panel">
-    <h3>Migration report</h3>
+    <h3>{{localize "FWM.Reports.Migration"}}</h3>
     <div class="fwm-summary">
-      <span>Готовы к cleanup: <strong>{{migrationSummary.fullyMigratedPngPaths}}</strong></span>
-      <span>Пропущено путей: <strong>{{migrationSummary.skippedPngPaths}}</strong></span>
-      <span>Изменено ссылок: <strong>{{migrationSummary.changedReferences}}</strong></span>
-      <span>Уже были WEBP: <strong>{{migrationSummary.alreadyMigratedReferences}}</strong></span>
+      <span>{{localize "FWM.Summary.MigratedPaths"}} <strong>{{migrationSummary.fullyMigratedPngPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.CleanupFiles"}} <strong>{{migrationSummary.cleanupEligibleFiles}}</strong></span>
+      <span>{{localize "FWM.Summary.SkippedPaths"}} <strong>{{migrationSummary.skippedPngPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.ChangedRefs"}} <strong>{{migrationSummary.changedReferences}}</strong></span>
+      <span>{{localize "FWM.Summary.AlreadyWebp"}} <strong>{{migrationSummary.alreadyMigratedReferences}}</strong></span>
       <span>Stale: <strong>{{migrationSummary.staleReferences}}</strong></span>
-      <span>Ошибки: <strong>{{migrationSummary.errors}}</strong></span>
+      <span>{{localize "FWM.Summary.Errors"}} <strong>{{migrationSummary.errors}}</strong></span>
+      <span>{{localize "FWM.Summary.LockErrors"}} <strong>{{migrationSummary.lockRestoreErrors}}</strong></span>
     </div>
-    <p class="fwm-muted">Cleanup удалит только PNG из списка <code>migrated</code>. Это гарантирует целостность только внутри областей, отмеченных при сканировании.</p>
-    <pre class="fwm-code">node tools/convert-cwebp.js --cleanup "D:\path\migration-report.json" --data "C:\Users\...\FoundryVTT\Data" --delete</pre>
+    {{#if migrationPreviewMeta.total}}
+    <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{migrationPreviewMeta.shown}} / {{migrationPreviewMeta.total}}</p>
     <div class="fwm-table-wrap">
       <table>
-        <thead><tr><th>PNG</th><th>WEBP</th><th>Refs</th><th>Changed</th><th>Already</th></tr></thead>
+        <thead><tr><th>PNG</th><th>WEBP</th><th>{{localize "FWM.Consistency.Repair"}}</th><th>Refs</th><th>Changed</th><th>Already</th><th>Cleanup</th></tr></thead>
         <tbody>
           {{#each migrationPreview}}
-          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{refCount}}</td><td>{{changed}}</td><td>{{already}}</td></tr>
+          <tr><td>{{oldPath}}</td><td>{{newPath}}</td><td>{{direction}}</td><td>{{refCount}}</td><td>{{changed}}</td><td>{{already}}</td><td>{{cleanupFiles}}</td></tr>
           {{/each}}
         </tbody>
       </table>
     </div>
+    {{/if}}
+    {{#if migrationIssuesMeta.total}}
+    <details class="fwm-issues" open>
+      <summary>{{localize "FWM.Common.Issues"}}: {{migrationIssuesMeta.total}}</summary>
+      <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{migrationIssuesMeta.shown}} / {{migrationIssuesMeta.total}}</p>
+      <div class="fwm-table-wrap fwm-issues-table"><table><thead><tr><th>{{localize "FWM.Common.Scope"}}</th><th>Status</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead><tbody>
+        {{#each migrationIssues}}<tr><td>{{scope}}</td><td>{{status}}</td><td>{{detail}}</td></tr>{{/each}}
+      </tbody></table></div>
+    </details>
+    {{/if}}
   </section>
   {{/if}}
 
   {{#if rollbackSummary}}
   <section class="fwm-panel">
-    <h3>Откат</h3>
+    <h3>{{localize "FWM.Reports.Rollback"}}</h3>
     <div class="fwm-summary">
-      <span>Возвращено: <strong>{{rollbackSummary.changed}}</strong></span>
-      <span>Уже PNG: <strong>{{rollbackSummary.already}}</strong></span>
+      <span>{{localize "FWM.Summary.Restored"}} <strong>{{rollbackSummary.changed}}</strong></span>
+      <span>{{localize "FWM.Summary.AlreadyPng"}} <strong>{{rollbackSummary.already}}</strong></span>
       <span>Stale: <strong>{{rollbackSummary.stale}}</strong></span>
-      <span>Ошибки: <strong>{{rollbackSummary.errors}}</strong></span>
+      <span>{{localize "FWM.Summary.Errors"}} <strong>{{rollbackSummary.errors}}</strong></span>
+      <span>{{localize "FWM.Summary.LockErrors"}} <strong>{{rollbackSummary.lockRestoreErrors}}</strong></span>
     </div>
+    {{#if rollbackIssuesMeta.total}}
+    <details class="fwm-issues" open>
+      <summary>{{localize "FWM.Common.Issues"}}: {{rollbackIssuesMeta.total}}</summary>
+      <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{rollbackIssuesMeta.shown}} / {{rollbackIssuesMeta.total}}</p>
+      <div class="fwm-table-wrap fwm-issues-table"><table><thead><tr><th>{{localize "FWM.Common.Scope"}}</th><th>Status</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead><tbody>
+        {{#each rollbackIssues}}<tr><td>{{scope}}</td><td>{{status}}</td><td>{{detail}}</td></tr>{{/each}}
+      </tbody></table></div>
+    </details>
+    {{/if}}
   </section>
   {{/if}}
 </section>

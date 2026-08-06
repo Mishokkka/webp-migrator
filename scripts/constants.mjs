@@ -1,15 +1,21 @@
 export const MODULE_ID = "fbl-webp-migrator";
 export const MODULE_TITLE = "FBL WebP Migrator";
-export const MODULE_VERSION = "0.2.1";
-export const MANIFEST_SCHEMA_VERSION = 2;
+export const MODULE_VERSION = "0.4.0";
+export const MANIFEST_SCHEMA_VERSION = 4;
+export const REPORT_SCHEMA_VERSION = 4;
+export const PENDING_RELOCKS_SETTING = "pendingPackRelocks";
 
 export const SUCCESS_STATUSES = new Set([
   "converted",
   "exists",
   "exists-missing-old",
-  "assume-existing",
-  "ok",
-  "success"
+  "assume-existing"
+]);
+
+export const VERIFIED_CONVERSION_STATUSES = new Set([
+  "converted",
+  "exists",
+  "exists-missing-old"
 ]);
 
 export const DEFAULT_SCAN_OPTIONS = Object.freeze({

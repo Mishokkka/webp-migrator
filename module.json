@@ -1,11 +1,12 @@
 {
   "id": "fbl-webp-migrator",
   "title": "FBL WebP Migrator",
-  "description": "Scans Foundry VTT documents and supported compendiums for local PNG references, exports a cwebp manifest, safely migrates references to WebP, and produces a verified cleanup report.",
-  "version": "0.2.1",
+  "description": "Scans Foundry VTT documents and supported compendiums for local PNG and WebP references, audits them against disk, safely repairs mismatched paths, converts PNG through a verified cwebp workflow, and quarantines only fingerprinted PNG files.",
+  "version": "0.4.0",
   "compatibility": {
     "minimum": "13",
-    "verified": "13.351"
+    "verified": "13.351",
+    "maximum": "13"
   },
   "authors": [
     {
@@ -19,5 +20,18 @@
     "styles/migrator.css"
   ],
   "socket": false,
-  "license": "MIT"
+  "license": "LICENSE",
+  "languages": [
+    {
+      "lang": "ru",
+      "name": "Русский",
+      "path": "lang/ru.json"
+    },
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
+  "url": "https://github.com/Mishokkka/webp-migrator"
 }

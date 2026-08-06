@@ -4,7 +4,7 @@ import { readScanOptionsFromRoot } from "../scripts/ui-options.mjs";
 
 const defaults = { worldActors: true, worldItems: true, worldScenes: true };
 
-test("reads the live checkbox values instead of defaults", () => {
+test("reads live checkbox values instead of defaults", () => {
   const checked = { worldActors: false, worldItems: false, worldScenes: true };
   const root = {
     querySelector(selector) {

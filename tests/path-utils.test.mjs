@@ -3,27 +3,52 @@ import assert from "node:assert/strict";
 
 import {
   collectPngReferences,
+  collectWebpReferences,
   findRichPngReferences,
+  findRichWebpReferences,
   getAtPath,
   normalizePhysicalPath,
+  normalizeWebpPhysicalPath,
   replaceTextReference,
+  sanitizeJsonValue,
   setAtPath,
+  splitPathSuffix,
+  toPngPhysicalPath,
+  toPngReference,
   toWebpReference
 } from "../scripts/path-utils.mjs";
 import { iterateDocumentTree } from "../scripts/scanner.mjs";
 
-test("normalizes physical paths and preserves reference suffix", () => {
-  assert.equal(normalizePhysicalPath("/assets/NPC/Test.png?v=2#x"), "assets/NPC/Test.png");
+test("normalizes local paths, collapses dot segments, and preserves suffixes", () => {
+  assert.equal(normalizePhysicalPath("/assets/NPC/./Test.png?v=2#x"), "assets/NPC/Test.png");
+  assert.equal(normalizeWebpPhysicalPath("assets/NPC/./Test.webp?v=2"), "assets/NPC/Test.webp");
   assert.equal(toWebpReference("assets/NPC/Test.PNG?v=2"), "assets/NPC/Test.webp?v=2");
+  assert.equal(splitPathSuffix("tokens/icon?.png").path, "tokens/icon?.png");
+  assert.equal(splitPathSuffix("tokens/hash#name.png").path, "tokens/hash#name.png");
   assert.equal(normalizePhysicalPath("https://example.com/test.png"), null);
   assert.equal(normalizePhysicalPath("../outside.png"), null);
+  assert.equal(normalizePhysicalPath("\\\\server\\share\\a.png"), null);
+  assert.equal(normalizePhysicalPath("C:relative.png"), null);
 });
 
-test("collects exact and rich-text PNG references", () => {
+test("trailing whitespace produces a real WebP replacement instead of a no-op", () => {
+  const refs = collectPngReferences({ img: "art/a.png \t" }, {
+    documentInfo: { uuid: "Actor.A", documentName: "Actor" }
+  });
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].oldValue, "art/a.png \t");
+  assert.equal(refs[0].newValue, "art/a.webp \t");
+  assert.notEqual(refs[0].oldValue, refs[0].newValue);
+});
+
+test("collects exact, rich-text, bare filename, and array references", () => {
   const source = {
     img: "actors/hero.png",
-    system: { portrait: "custom/system-face.png?rev=3" },
-    content: '<p><img src="journals/map.png"></p><style>.x{background:url(tiles/floor.png)}</style>',
+    system: {
+      portrait: "custom/system-face.png?rev=3",
+      gallery: ["bare.png", "art/second.png"]
+    },
+    content: '<p><img src="journals/map.png"><img src="dragon.png"></p><style>.x{background:url(tiles/floor.png)}</style>',
     items: [{ img: "embedded/skip.png" }]
   };
   const refs = collectPngReferences(source, {
@@ -31,19 +56,50 @@ test("collects exact and rich-text PNG references", () => {
     skipRootFields: new Set(["items"]),
     documentInfo: { uuid: "Actor.A", documentName: "Actor" }
   });
-  assert.equal(refs.length, 4);
   assert.deepEqual(refs.map((ref) => ref.oldPath).sort(), [
     "actors/hero.png",
+    "art/second.png",
+    "bare.png",
     "custom/system-face.png",
+    "dragon.png",
     "journals/map.png",
     "tiles/floor.png"
   ]);
   assert.equal(refs.find((ref) => ref.oldPath === "journals/map.png").mode, "text");
+  assert.equal(refs.find((ref) => ref.oldPath === "bare.png").mode, "exact");
 });
 
-test("finds multiple rich references without accepting remote URLs", () => {
-  const refs = findRichPngReferences('url("a/b.png") https://site/x.png src="local/c.png?x=1"');
-  assert.deepEqual(refs, ["a/b.png", "local/c.png?x=1"]);
+
+test("collects WebP references as canonical PNG/WebP pairs", () => {
+  const source = {
+    img: "actors/hero.webp ",
+    system: { gallery: ["bare.webp", "art/second.webp?v=2"] },
+    content: '<img src="journals/map.webp"><style>.x{background:url(tiles/floor.webp)}</style>'
+  };
+  const refs = collectWebpReferences(source, {
+    richText: true,
+    documentInfo: { uuid: "Actor.A", documentName: "Actor" }
+  });
+  assert.deepEqual(refs.map((ref) => ref.oldPath).sort(), [
+    "actors/hero.png",
+    "art/second.png",
+    "bare.png",
+    "journals/map.png",
+    "tiles/floor.png"
+  ]);
+  const exact = refs.find((ref) => ref.oldPath === "actors/hero.png");
+  assert.equal(exact.sourceFormat, "webp");
+  assert.equal(exact.oldValue, "actors/hero.png ");
+  assert.equal(exact.newValue, "actors/hero.webp ");
+  assert.equal(toPngReference("art/a.webp?v=2"), "art/a.png?v=2");
+  assert.equal(toPngPhysicalPath("art/a.webp?v=2"), "art/a.png");
+});
+
+test("finds PNG and WebP references without accepting remote URLs", () => {
+  const png = findRichPngReferences('url("a/b.png") https://site/x.png src="local/c.png?x=1" <img src="dragon.png">').sort();
+  assert.deepEqual(png, ["a/b.png", "dragon.png", "local/c.png?x=1"]);
+  const webp = findRichWebpReferences('<img src="a.webp"> url("art/b.webp?v=2") https://site/x.webp').sort();
+  assert.deepEqual(webp, ["a.webp", "art/b.webp?v=2"]);
 });
 
 test("safe path access supports arrays and rejects prototype paths", () => {
@@ -55,9 +111,18 @@ test("safe path access supports arrays and rejects prototype paths", () => {
   assert.equal({}.polluted, undefined);
 });
 
-test("text replacement distinguishes changed, already and stale", () => {
-  assert.deepEqual(replaceTextReference("x/a.png y", "x/a.png", "x/a.webp"), { status: "changed", value: "x/a.webp y" });
-  assert.equal(replaceTextReference("x/a.webp y", "x/a.png", "x/a.webp").status, "already");
+test("recursive JSON sanitization removes dangerous keys", () => {
+  const raw = JSON.parse('{"safe":1,"__proto__":{"polluted":true},"nested":{"constructor":{"x":1},"ok":2}}');
+  const clean = sanitizeJsonValue(raw);
+  assert.deepEqual(clean, { safe: 1, nested: { ok: 2 } });
+  assert.equal({}.polluted, undefined);
+});
+
+test("text replacement is bounded on both sides", () => {
+  assert.deepEqual(replaceTextReference("(x/a.png) y", "x/a.png", "x/a.webp"), { status: "changed", value: "(x/a.webp) y" });
+  assert.equal(replaceTextReference("(x/a.webp) y", "x/a.png", "x/a.webp").status, "already");
+  assert.equal(replaceTextReference("extra/x/a.png", "x/a.png", "x/a.webp").status, "stale");
+  assert.equal(replaceTextReference("x/a.png.backup", "x/a.png", "x/a.webp").status, "stale");
   assert.equal(replaceTextReference("none", "x/a.png", "x/a.webp").status, "stale");
 });
 
