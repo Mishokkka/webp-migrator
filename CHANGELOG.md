@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.3
+
+### Исправления ревью PR #3
+
+- Placeholder repair теперь сопоставляет PNG/WEBP-алиасы с учетом регистронезависимости Windows/macOS и не пропускает ссылки, отличающиеся только регистром пути.
+- Post-write предупреждения Foundry больше не теряются: успешная запись с ошибкой позднего hook попадает в `issues` как `changed-with-warning`, сохраняя rollback-информацию.
+- Исправлен двойной учет consistency `PNG -> WEBP` в объединенной сводке migration reports.
+- `splitPathSuffix` выбирает реальное расширение ассета до query/fragment и не путает `.png` внутри query-параметра с расширением самого файла.
+- Импорт dry-run conversion report теперь явно отклоняется вместо превращения `would-convert` в ложные `failed`; UI просит запустить реальную конвертацию без `--dry-run`.
+- Добавлены regression tests для case-only placeholder aliases, query-значений с `.png`, dry-run report gate и direction-tagged migration summaries.
+- Уточнены тестовые фикстуры и имя локальной dedupe-переменной scanner без изменения поведения.
+
 ## 0.4.2
 
 ### Диагностика dry-run и удаленные ассеты

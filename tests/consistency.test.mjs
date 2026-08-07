@@ -247,3 +247,56 @@ test("both-missing references can be replaced with the Foundry placeholder and r
   assert.equal(document.current().system.back, "art/missing.webp");
 });
 
+test("placeholder repair resolves case-only PNG/WEBP aliases on case-insensitive platforms", async () => {
+  const originalProcess = globalThis.process;
+  try {
+    globalThis.process = { ...originalProcess, platform: "win32" };
+    const document = mockDocument({ img: "Art/Missing.png", system: { back: "art/missing.webp" } });
+    installMockGame(document);
+    const pngRef = ref("Art/Missing.png", "Art/Missing.webp", ["img"], "png");
+    pngRef.oldPath = "Art/Missing.png";
+    pngRef.newPath = "Art/Missing.webp";
+    pngRef.oldValue = "Art/Missing.png";
+    pngRef.newValue = "Art/Missing.webp";
+    const webpRef = ref("art/missing.png", "art/missing.webp", ["system", "back"], "webp");
+    webpRef.oldPath = "art/missing.png";
+    webpRef.newPath = "art/missing.webp";
+    webpRef.oldValue = "art/missing.png";
+    webpRef.newValue = "art/missing.webp";
+    const sourceManifest = {
+      type: "fbl-webp-migrator-manifest",
+      schemaVersion: 4,
+      version: "0.4.3",
+      manifestId: "manifest-a",
+      worldId: "world-a",
+      worldTitle: "World A",
+      capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
+      entries: [{ oldPath: "Art/Missing.png", newPath: "Art/Missing.webp", wildcard: false, refs: [pngRef] }],
+      webpEntries: [{ oldPath: "art/missing.png", newPath: "art/missing.webp", wildcard: false, refs: [webpRef] }]
+    };
+    const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
+    const raw = {
+      type: "fbl-webp-migrator-consistency-report",
+      schemaVersion: 4,
+      version: "0.4.3",
+      producer: "test",
+      sourceManifestId: "manifest-a",
+      sourceWorldId: "world-a",
+      dataRootId: `sha256:${"c".repeat(64)}`,
+      entries: [{
+        oldPath: "Art/Missing.png",
+        newPath: "Art/Missing.webp",
+        files: [{ oldPath: "Art/Missing.png", newPath: "Art/Missing.webp", png: missing, webp: missing }]
+      }]
+    };
+
+    const clean = sanitizeConsistencyReport(raw, sourceManifest, "world-a");
+    const migration = await applyMissingPlaceholderRepairs(sourceManifest, clean, {});
+    assert.equal(document.current().img, "icons/svg/mystery-man.svg");
+    assert.equal(document.current().system.back, "icons/svg/mystery-man.svg");
+    assert.equal(migration.summary.changedReferences, 2);
+  } finally {
+    globalThis.process = originalProcess;
+  }
+});
+

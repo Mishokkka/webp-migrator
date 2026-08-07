@@ -364,6 +364,7 @@ function summarizeConversion(entries, ignoredCount = 0) {
 export function sanitizeConversionReport(report, manifest, currentWorldId = game.world?.id ?? null) {
   if (!manifest || manifest.type !== "fbl-webp-migrator-manifest") throw new Error("Сначала создай или импортируй текущий manifest.");
   if (!report || report.type !== "fbl-webp-migrator-conversion-report") throw new Error("Это не conversion report FBL WebP Migrator.");
+  if (report.dryRun === true) throw new Error("Это dry-run conversion report. Он предназначен только для предварительного просмотра; запусти конвертацию без --dry-run и импортируй новый report.");
   if (!manifest.manifestId) throw new Error("Manifest устарел и не содержит manifestId. Выполни новое сканирование.");
   if (report.sourceManifestId !== manifest.manifestId) throw new Error("Conversion report создан для другого manifest. Импорт отклонён.");
   if (manifest.worldId !== currentWorldId || report.sourceWorldId !== currentWorldId) throw new Error("Manifest или conversion report относятся к другому миру.");
@@ -866,7 +867,9 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
   const changedRefs = results
     .filter((result) => result.status === "changed")
     .map((result) => ({ ...result.ref, appliedDirection: "forward" }));
-  const errorResults = results.filter((result) => ["error", "skipped", "stale", "lock-restore-error"].includes(result.status));
+  const errorResults = results.filter((result) =>
+    ["error", "skipped", "stale", "lock-restore-error"].includes(result.status) || result.warning
+  );
   const lockRestoreErrors = results.filter((result) => result.status === "lock-restore-error").length;
   return {
     type: "fbl-webp-migrator-migration-report",
@@ -898,8 +901,8 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
       uuid: result.ref?.uuid,
       fieldLabel: result.ref?.fieldLabel,
       pack: result.pack,
-      status: result.status,
-      error: result.error
+      status: result.warning ? "changed-with-warning" : result.status,
+      error: result.error ?? result.warning
     }))
   };
 }
@@ -1051,7 +1054,7 @@ export function mergeMigrationReports(previous, current) {
   const explicitForward = migrated.filter((item) => item?.direction === "png-to-webp").length;
   const reverse = migrated.filter((item) => item?.direction === "webp-to-png").length;
   const placeholder = migrated.filter((item) => item?.direction === "missing-to-placeholder").length;
-  const forward = migrated.length - reverse - placeholder;
+  const forward = migrated.length - reverse - placeholder - explicitForward;
   const summary = {
     inputEntries: new Set(resultItems.map((item) => item?.oldPath).filter(Boolean)).size,
     fullyMigratedPngPaths: forward,

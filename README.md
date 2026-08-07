@@ -1,4 +1,4 @@
-# FBL WebP Migrator 0.4.1
+# FBL WebP Migrator 0.4.3
 
 Целевая среда: Foundry VTT 13.351. Модуль не зависит от игровой системы.
 

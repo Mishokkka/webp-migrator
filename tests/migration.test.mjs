@@ -124,6 +124,14 @@ test("conversion report cannot inject document refs or trusted summary", () => {
   assert.equal({}.polluted, undefined);
 });
 
+test("dry-run conversion reports are rejected before they can become false failures", () => {
+  const sourceManifest = manifestFor([exactRef()]);
+  const raw = reportFor();
+  raw.dryRun = true;
+  raw.entries[0].status = "would-convert";
+  assert.throws(() => sanitizeConversionReport(raw, sourceManifest, "world-a"), /dry-run conversion report/);
+});
+
 test("imported assume-existing entries are rejected, internal assumption remains migration-only", () => {
   globalThis.game = { world: { id: "world-a" } };
   const manifest = manifestFor([exactRef()]);
@@ -434,12 +442,6 @@ function installCompendiumScene(data, { throwAfterWrite = false } = {}) {
         return makeActorDelta(token);
       }
     };
-    Object.defineProperty(token, "delta", {
-      get() {
-        const delta = source.tokens.find((item) => item._id === id)?.delta;
-        return delta ? { id: delta._id ?? "D" } : null;
-      }
-    });
     return token;
   }
 
@@ -564,4 +566,43 @@ test("a write that persists before a thrown hook error is still recorded for rol
   assert.equal(store.current().tiles[0].texture.src, "art/a.webp");
   assert.equal(migration.summary.changedReferences, 1);
   assert.equal(migration.changedRefs.length, 1);
+  assert.equal(migration.issues.length, 1);
+  assert.equal(migration.issues[0].status, "changed-with-warning");
+  assert.match(migration.issues[0].error, /Foundry сообщил ошибку после записи/);
 });
+
+test("merged migration summary keeps conversion and consistency directions separate", () => {
+  const report = {
+    type: "fbl-webp-migrator-migration-report",
+    worldId: "world-a",
+    sourceManifestId: "m1",
+    sourceDataRootId: `sha256:${"c".repeat(64)}`,
+    migrated: [
+      { oldPath: "conversion.png", newPath: "conversion.webp", refCount: 1, changed: 1, already: 0 },
+      { oldPath: "forward.png", newPath: "forward.webp", direction: "png-to-webp", refCount: 1, changed: 1, already: 0 },
+      { oldPath: "reverse.png", newPath: "reverse.webp", direction: "webp-to-png", refCount: 1, changed: 1, already: 0 },
+      { oldPath: "missing.png", newPath: "missing.webp", direction: "missing-to-placeholder", refCount: 1, changed: 1, already: 0 }
+    ],
+    skipped: [],
+    cleanupFiles: [],
+    changedRefs: [],
+    issues: [],
+    summary: {}
+  };
+  const previous = {
+    ...report,
+    sourceManifestId: "m0",
+    migrated: [],
+    skipped: [],
+    cleanupFiles: [],
+    changedRefs: [],
+    issues: [],
+    summary: {}
+  };
+  const merged = mergeMigrationReports(previous, report);
+  assert.equal(merged.summary.fullyMigratedPngPaths, 1);
+  assert.equal(merged.summary.consistencyForwardPaths, 1);
+  assert.equal(merged.summary.consistencyReversePaths, 1);
+  assert.equal(merged.summary.consistencyPlaceholderPaths, 1);
+});
+

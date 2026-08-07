@@ -28,6 +28,8 @@ test("normalizes local paths, collapses dot segments, and preserves suffixes", (
   assert.equal(splitPathSuffix("tokens/icon?.webp").path, "tokens/icon?.webp");
   assert.equal(splitPathSuffix("art/hash#name.webp").path, "art/hash#name.webp");
   assert.deepEqual(splitPathSuffix("art/a.webp?v=2#x"), { path: "art/a.webp", suffix: "?v=2#x" });
+  assert.deepEqual(splitPathSuffix("art/a.webp?fallback=b.png"), { path: "art/a.webp", suffix: "?fallback=b.png" });
+  assert.deepEqual(splitPathSuffix("art/a.png?fallback=b.webp"), { path: "art/a.png", suffix: "?fallback=b.webp" });
   assert.equal(normalizePhysicalPath("https://example.com/test.png"), null);
   assert.equal(normalizePhysicalPath("../outside.png"), null);
   assert.equal(normalizePhysicalPath("\\\\server\\share\\a.png"), null);

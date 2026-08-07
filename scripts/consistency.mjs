@@ -366,8 +366,13 @@ export async function applyConsistencyRepairs(manifest, consistencyReport, optio
 
 function placeholderRefsForEntry(manifest, reportEntry) {
   const refs = [];
-  const pngEntry = (manifest.entries ?? []).find((entry) => entry.oldPath === reportEntry.oldPath);
-  const webpEntry = (manifest.webpEntries ?? []).find((entry) => entry.oldPath === reportEntry.oldPath);
+  const caseInsensitive = isCaseInsensitivePlatform();
+  const reportKey = pathKey(reportEntry.oldPath, caseInsensitive);
+  const findEntry = (entries) => (entries ?? []).find((entry) =>
+    pathKey(entry?.oldPath, caseInsensitive) === reportKey
+  );
+  const pngEntry = findEntry(manifest.entries);
+  const webpEntry = findEntry(manifest.webpEntries);
   for (const ref of pngEntry?.refs ?? []) {
     refs.push({
       ...deepClone(ref),
