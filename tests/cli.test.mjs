@@ -126,6 +126,21 @@ test("PNG and WebP inspection rejects truncated or container-only fakes", () => 
   assert.equal(cli.inspectWebp(vp8xOnly).valid, false);
 }));
 
+test("PNG inspection tolerates harmless bytes after IEND", () => withCleanup((root) => {
+  const png = write(root, "trailing.png", Buffer.concat([makePng(7, 9), Buffer.from("legacy-metadata")]));
+  assert.deepEqual(cli.inspectPng(png), { valid: true, width: 7, height: 9, animated: false });
+}));
+
+test("dry-run reports the concrete reason when a .png path is not PNG data", () => withCleanup((rootPath) => {
+  const data = path.join(rootPath, "Data");
+  fs.mkdirSync(data);
+  write(data, "art/not-really.png", Buffer.alloc(80, 0x41));
+  const root = cli.validateDataRoot(data);
+  const result = cli.convertConcrete(root, "art/not-really.png", { overwrite: false, trustExisting: false, allowLarger: false, dryRun: true });
+  assert.equal(result.status, "failed");
+  assert.match(result.error, /does not contain a PNG signature/);
+}));
+
 test("APNG is skipped even when a valid WebP sibling already exists", () => withCleanup((rootPath) => {
   fs.mkdirSync(path.join(rootPath, "Data"));
   const data = path.join(rootPath, "Data");
@@ -182,7 +197,7 @@ test("symlink paths escaping Data are rejected", (t) => withCleanup((rootPath) =
   assert.throws(() => cli.toAbsolute(root, "link/secret.png"), /Symlink|Real path escapes/);
 }));
 
-test("full conversion handles wildcard ? and writes a bound report", () => withCleanup((rootPath) => {
+test("full conversion handles wildcard ? and writes a bound report", { skip: process.platform === "win32" ? "Fake cwebp launcher is POSIX-only." : false }, () => withCleanup((rootPath) => {
   const data = path.join(rootPath, "Data");
   fs.mkdirSync(data);
   write(data, "tokens/icon1.png", makePng(4, 5, { payload: 200 }));
@@ -336,11 +351,12 @@ test("consistency audit identifies safe forward and reverse path repairs", () =>
   assert.equal(report.summary.forwardRepairPaths, 1);
   assert.equal(report.summary.reverseRepairPaths, 1);
   assert.equal(report.summary.consistentPaths, 1);
-  assert.equal(report.summary.unresolvedPaths, 1);
+  assert.equal(report.summary.placeholderRepairPaths, 1);
+  assert.equal(report.summary.unresolvedPaths, 0);
   assert.equal(report.entries.find((entry) => entry.oldPath === "art/forward.png").status, "repair-to-webp");
   assert.equal(report.entries.find((entry) => entry.oldPath === "art/reverse.png").status, "repair-to-png");
   assert.equal(report.entries.find((entry) => entry.oldPath === "art/stable.png").status, "consistent");
-  assert.equal(report.entries.find((entry) => entry.oldPath === "art/missing.png").status, "unresolved");
+  assert.equal(report.entries.find((entry) => entry.oldPath === "art/missing.png").status, "repair-to-placeholder");
   assert.match(report.dataRootId, /^sha256:[a-f0-9]{64}$/);
   assert.equal(fs.existsSync(out), true);
 }));
@@ -353,6 +369,29 @@ test("consistency audit refuses manifests without a complete WebP-reference scan
     type: "fbl-webp-migrator-manifest",
     manifestId: "manifest-old",
     worldId: "world-a",
+    entries: [],
+    webpEntries: []
+  }));
+  assert.throws(() => cli.audit({ audit: manifestPath, data, "world-id": "world-a" }), /complete WebP-reference scan/);
+}));
+
+
+test("wildcard expansion returns no matches when its base folder is absent", () => withCleanup((rootPath) => {
+  const data = path.join(rootPath, "Data");
+  fs.mkdirSync(data);
+  const root = cli.validateDataRoot(data);
+  assert.deepEqual(cli.expandPattern(root, "missing/folder/*.png"), []);
+}));
+
+test("consistency audit rejects a schema-less manifest even with capability flags", () => withCleanup((rootPath) => {
+  const data = path.join(rootPath, "Data");
+  fs.mkdirSync(path.join(data, "worlds", "world-a"), { recursive: true });
+  const manifestPath = path.join(rootPath, "manifest-no-schema.json");
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    type: "fbl-webp-migrator-manifest",
+    manifestId: "manifest-no-schema",
+    worldId: "world-a",
+    capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
     entries: [],
     webpEntries: []
   }));

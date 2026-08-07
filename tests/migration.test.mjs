@@ -336,3 +336,232 @@ test("merged reports preserve cleanup binding unless Data roots conflict", () =>
   assert.equal(conflict.cleanupFiles.length, 0);
   assert.ok(conflict.issues.some((issue) => issue.status === "merge-data-root-conflict"));
 });
+
+test("a later partial result revokes older success and cleanup while summaries are recomputed", () => {
+  const cleanupFile = {
+    oldPath: "art/a.png",
+    newPath: "art/a.webp",
+    oldSha256: "a".repeat(64),
+    newSha256: "b".repeat(64),
+    manifestOldPath: "art/a.png"
+  };
+  const previous = {
+    type: "fbl-webp-migrator-migration-report",
+    worldId: "world-a",
+    sourceManifestId: "m1",
+    sourceDataRootId: `sha256:${"c".repeat(64)}`,
+    migrated: [{ oldPath: "art/a.png", newPath: "art/a.webp", refCount: 1, changed: 1, already: 0, stale: 0, errors: 0 }],
+    skipped: [],
+    cleanupFiles: [cleanupFile],
+    changedRefs: [exactRef()],
+    issues: [],
+    summary: { fullyMigratedPngPaths: 999, cleanupEligibleFiles: 999 }
+  };
+  const current = {
+    type: previous.type,
+    worldId: "world-a",
+    sourceManifestId: "m2",
+    sourceDataRootId: previous.sourceDataRootId,
+    migrated: [],
+    skipped: [{ oldPath: "art/a.png", newPath: "art/a.webp", refCount: 2, changed: 0, already: 1, stale: 1, errors: 0, reason: "partial" }],
+    cleanupFiles: [],
+    changedRefs: [],
+    issues: [{ oldPath: "art/a.png", uuid: "Actor.B", status: "stale" }],
+    summary: { fullyMigratedPngPaths: 999, cleanupEligibleFiles: 999 }
+  };
+
+  const merged = mergeMigrationReports(previous, current);
+  assert.equal(merged.migrated.length, 0);
+  assert.equal(merged.skipped.length, 1);
+  assert.equal(merged.cleanupFiles.length, 0);
+  assert.deepEqual(merged.summary, {
+    inputEntries: 1,
+    fullyMigratedPngPaths: 0,
+    consistencyForwardPaths: 0,
+    consistencyReversePaths: 0,
+    consistencyPlaceholderPaths: 0,
+    cleanupEligibleFiles: 0,
+    skippedPngPaths: 1,
+    changedReferences: 1,
+    alreadyMigratedReferences: 1,
+    staleReferences: 1,
+    errors: 0,
+    lockRestoreErrors: 0
+  });
+});
+
+function installCompendiumScene(data, { throwAfterWrite = false } = {}) {
+  let source = structuredClone(data);
+  const pack = {
+    collection: "world.oldscenes",
+    title: "Old Scenes",
+    metadata: { packageType: "world" },
+    locked: false,
+    async configure({ locked }) { this.locked = locked; },
+    async getDocument(id) { return id === source._id ? makeScene() : null; },
+    async getDocuments(query = {}) {
+      const ids = query?._id__in;
+      if (Array.isArray(ids) && !ids.includes(source._id)) return [];
+      return [makeScene()];
+    }
+  };
+
+  function makeActorDelta(token) {
+    const deltaSource = token.toObject(true).delta ?? {};
+    return {
+      uuid: `${token.uuid}.ActorDelta.${deltaSource._id ?? "D"}`,
+      id: deltaSource._id ?? "D",
+      documentName: "ActorDelta",
+      parent: token,
+      toObject: () => structuredClone(deltaSource)
+    };
+  }
+
+  function makeToken(scene, id) {
+    const tokenSource = source.tokens.find((token) => token._id === id);
+    if (!tokenSource) return null;
+    const token = {
+      uuid: `${scene.uuid}.Token.${id}`,
+      id,
+      documentName: "Token",
+      name: tokenSource.name ?? id,
+      parent: scene,
+      toObject: () => structuredClone(source.tokens.find((item) => item._id === id)),
+      getEmbeddedDocument(name, childId) {
+        if (name !== "ActorDelta") return null;
+        const delta = source.tokens.find((item) => item._id === id)?.delta;
+        if (!delta || (delta._id && delta._id !== childId)) return null;
+        return makeActorDelta(token);
+      }
+    };
+    Object.defineProperty(token, "delta", {
+      get() {
+        const delta = source.tokens.find((item) => item._id === id)?.delta;
+        return delta ? { id: delta._id ?? "D" } : null;
+      }
+    });
+    return token;
+  }
+
+  function makeTile(scene, id) {
+    const tileSource = source.tiles.find((tile) => tile._id === id);
+    if (!tileSource) return null;
+    return {
+      uuid: `${scene.uuid}.Tile.${id}`,
+      id,
+      documentName: "Tile",
+      parent: scene,
+      toObject: () => structuredClone(source.tiles.find((item) => item._id === id))
+    };
+  }
+
+  function makeScene() {
+    const scene = {
+      uuid: `Compendium.world.oldscenes.Scene.${source._id}`,
+      id: source._id,
+      documentName: "Scene",
+      name: source.name ?? "Old Scene",
+      compendium: pack,
+      pack: pack.collection,
+      toObject: () => structuredClone(source),
+      getEmbeddedDocument(name, id) {
+        if (name === "Token") return makeToken(scene, id);
+        if (name === "Tile") return makeTile(scene, id);
+        return null;
+      },
+      async updateEmbeddedDocuments(name, updates) {
+        for (const update of updates) {
+          const list = name === "Token" ? source.tokens : name === "Tile" ? source.tiles : null;
+          if (!list) throw new Error(`Unexpected embedded type: ${name}`);
+          const item = list.find((entry) => entry._id === update._id);
+          if (!item) throw new Error(`Missing ${name}.${update._id}`);
+          for (const [key, value] of Object.entries(update)) {
+            if (key === "_id") continue;
+            applyDotted(item, key, value);
+          }
+        }
+        if (throwAfterWrite) throw new Error("hook failed after database write");
+        return [];
+      }
+    };
+    return scene;
+  }
+
+  installMockGame(null, { game: { packs: new Map([[pack.collection, pack]]) } });
+  globalThis.fromUuid = async (uuid) => {
+    if (uuid === `Compendium.world.oldscenes.Scene.${source._id}`) return makeScene();
+    throw new Error(`Nested fromUuid should not be used: ${uuid}`);
+  };
+  return { pack, current: () => structuredClone(source) };
+}
+
+function compendiumRef({ kind = "ActorDelta", fieldPath = ["img"] } = {}) {
+  const rootUuid = "Compendium.world.oldscenes.Scene.S";
+  const suffix = kind === "ActorDelta" ? "Token.T.ActorDelta.D" : "Tile.L";
+  return {
+    ...exactRef(),
+    uuid: `${rootUuid}.${suffix}`,
+    documentId: kind === "ActorDelta" ? "D" : "L",
+    documentName: kind,
+    rootUuid,
+    rootDocumentName: "Scene",
+    pack: "world.oldscenes",
+    packageType: "world",
+    fieldPath,
+    fieldLabel: fieldPath.join("."),
+    rootField: fieldPath[0]
+  };
+}
+
+test("compendium ActorDelta images are written through Scene Token.delta and verify from a fresh pack read", async () => {
+  const store = installCompendiumScene({
+    _id: "S",
+    tokens: [{ _id: "T", delta: { _id: "D", img: "art/a.png" } }],
+    tiles: []
+  });
+  const ref = compendiumRef();
+  const manifest = manifestFor([ref]);
+  const report = sanitizeConversionReport(reportFor(), manifest, "world-a");
+
+  const migration = await applyMigration(manifest, report, {});
+  assert.equal(store.current().tokens[0].delta.img, "art/a.webp");
+  assert.equal(migration.summary.changedReferences, 1);
+  assert.equal(migration.summary.errors, 0);
+  assert.equal(migration.changedRefs.length, 1);
+
+  const rollback = await rollbackMigration(migration, {});
+  assert.equal(rollback.changed, 1);
+  assert.equal(store.current().tokens[0].delta.img, "art/a.png");
+});
+
+test("compendium embedded verification reloads the root instead of trusting stale Tile instances", async () => {
+  const store = installCompendiumScene({
+    _id: "S",
+    tokens: [],
+    tiles: [{ _id: "L", texture: { src: "art/a.png" } }]
+  });
+  const ref = compendiumRef({ kind: "Tile", fieldPath: ["texture", "src"] });
+  const manifest = manifestFor([ref]);
+  const report = sanitizeConversionReport(reportFor(), manifest, "world-a");
+
+  const migration = await applyMigration(manifest, report, {});
+  assert.equal(store.current().tiles[0].texture.src, "art/a.webp");
+  assert.equal(migration.summary.changedReferences, 1);
+  assert.equal(migration.summary.errors, 0);
+});
+
+test("a write that persists before a thrown hook error is still recorded for rollback after fresh verification", async () => {
+  const store = installCompendiumScene({
+    _id: "S",
+    tokens: [],
+    tiles: [{ _id: "L", texture: { src: "art/a.png" } }]
+  }, { throwAfterWrite: true });
+  const ref = compendiumRef({ kind: "Tile", fieldPath: ["texture", "src"] });
+  const manifest = manifestFor([ref]);
+  const report = sanitizeConversionReport(reportFor(), manifest, "world-a");
+
+  const migration = await applyMigration(manifest, report, {});
+  assert.equal(store.current().tiles[0].texture.src, "art/a.webp");
+  assert.equal(migration.summary.changedReferences, 1);
+  assert.equal(migration.changedRefs.length, 1);
+});

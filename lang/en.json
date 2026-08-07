@@ -164,8 +164,20 @@
   "FWM.Confirm.ConsistencyBody": "Only verified safe cases will be changed: a PNG reference when a valid WebP exists, and a WebP reference when the WebP is missing or invalid but a valid PNG remains. Ambiguous cases stay unchanged.",
   "FWM.Errors.ManifestAndConsistencyRequired": "A manifest and consistency report are required.",
   "FWM.Status.ImportingConsistency": "Importing consistency report...",
-  "FWM.Status.ConsistencyImported": "Audit imported: {forward} paths can move to WebP and {reverse} can return to PNG.",
+  "FWM.Status.ConsistencyImported": "Audit imported: {forward} paths can move to WebP, {reverse} can return to PNG, and {placeholder} can be replaced with the placeholder.",
   "FWM.Status.ApplyingConsistency": "Repairing mismatched paths...",
   "FWM.Status.ConsistencyApplied": "Changed references: {changed}. To WebP: {forward}. To PNG: {reverse}.",
-  "FWM.Common.CurrentFormat": "Current path"
+  "FWM.Common.CurrentFormat": "Current format",
+  "FWM.Status.LockRecoveryFailed": "Failed to restore {count} compendium locks. See console.",
+  "FWM.Status.LockRecoveryDone": "Restored compendium locks: {count}.",
+  "FWM.Status.LockRecoveryUnexpected": "Compendium lock recovery failed unexpectedly. See console.",
+  "FWM.Actions.ApplyMissingPlaceholder": "Replace missing with placeholder",
+  "FWM.Summary.ToPlaceholder": "Repairable to placeholder:",
+  "FWM.Consistency.ToPlaceholder": "→ Placeholder",
+  "FWM.Consistency.PlaceholderHint": "If both PNG and WebP are physically missing, the separate button can replace Foundry references with icons/svg/mystery-man.svg. Wildcard paths are not changed.",
+  "FWM.Consistency.BothMissingRepairable": "Both files are missing; the reference can be safely replaced with the placeholder.",
+  "FWM.Confirm.MissingPlaceholderTitle": "Replace missing files",
+  "FWM.Confirm.MissingPlaceholderBody": "For paths where both PNG and WebP are absent, all discovered Foundry references will be replaced with icons/svg/mystery-man.svg. Wildcards and ambiguous cases are left unchanged. The operation is recorded in the migration report and can be rolled back.",
+  "FWM.Status.ApplyingMissingPlaceholder": "Replacing references to long-deleted files...",
+  "FWM.Status.MissingPlaceholderApplied": "Replaced references with placeholder: {changed}; paths: {paths}."
 }

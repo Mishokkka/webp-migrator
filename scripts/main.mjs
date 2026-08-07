@@ -9,11 +9,23 @@ import {
 } from "./migration.mjs";
 import {
   applyConsistencyRepairs,
+  applyMissingPlaceholderRepairs,
   sanitizeConsistencyReport
 } from "./consistency.mjs";
 import { sanitizeManifest, sanitizeScanOptions, scanFoundry } from "./scanner.mjs";
 
 let appInstance = null;
+
+function tr(key, fallback, data = null) {
+  const i18n = globalThis.game?.i18n;
+  if (!i18n) return fallback;
+  try {
+    const translated = data ? i18n.format(key, data) : i18n.localize(key);
+    return translated && translated !== key ? translated : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 function requireGM() {
   if (!game.user?.isGM) throw new Error(`${MODULE_TITLE} доступен только GM.`);
@@ -50,6 +62,12 @@ function createApi() {
       const report = sanitizeConsistencyReport(rawReport, manifest, game.world?.id ?? null);
       return applyConsistencyRepairs(manifest, report, options, hooks);
     },
+    async repairMissingAssets(manifestInput, rawReport, options = {}, hooks = {}) {
+      requireGM();
+      const manifest = sanitizeManifest(manifestInput, game.world?.id ?? null);
+      const report = sanitizeConsistencyReport(rawReport, manifest, game.world?.id ?? null);
+      return applyMissingPlaceholderRepairs(manifest, report, options, hooks);
+    },
     async rollbackReport(rawReport, options = {}, hooks = {}) {
       requireGM();
       const report = sanitizeMigrationReportForRollback(rawReport, game.world?.id ?? null);
@@ -76,16 +94,36 @@ Hooks.once("init", () => {
 });
 
 Hooks.once("ready", async () => {
-  const recovery = await recoverPendingPackLocks();
-  if (recovery.issues.length) {
-    console.error(`${MODULE_TITLE} | Failed to recover compendium locks`, recovery.issues);
-    ui.notifications.error(`FBL WebP Migrator: не удалось восстановить ${recovery.issues.length} блокировок compendium. См. консоль.`);
-  } else if (recovery.restored) {
-    ui.notifications.info(`FBL WebP Migrator восстановил блокировки compendium: ${recovery.restored}.`);
-  }
+  // Publish the API before attempting recovery. A settings or pack failure must
+  // not make the module unavailable for diagnostics and manual recovery.
   const api = createApi();
   game.fblWebpMigrator = api;
   const module = game.modules?.get(MODULE_ID);
   if (module) module.api = api;
+
+  try {
+    const recovery = await recoverPendingPackLocks();
+    if (recovery.issues.length) {
+      console.error(`${MODULE_TITLE} | Failed to recover compendium locks`, recovery.issues);
+      ui.notifications.error(tr(
+        "FWM.Status.LockRecoveryFailed",
+        `FBL WebP Migrator: failed to restore ${recovery.issues.length} compendium locks. See console.`,
+        { count: recovery.issues.length }
+      ));
+    } else if (recovery.restored) {
+      ui.notifications.info(tr(
+        "FWM.Status.LockRecoveryDone",
+        `FBL WebP Migrator restored compendium locks: ${recovery.restored}.`,
+        { count: recovery.restored }
+      ));
+    }
+  } catch (error) {
+    console.error(`${MODULE_TITLE} | Unexpected compendium lock recovery failure`, error);
+    ui.notifications.error(tr(
+      "FWM.Status.LockRecoveryUnexpected",
+      "FBL WebP Migrator: compendium lock recovery failed unexpectedly. See console."
+    ));
+  }
+
   console.info(`${MODULE_TITLE} ${MODULE_VERSION} ready. Open with game.fblWebpMigrator.open()`);
 });

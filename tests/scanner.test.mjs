@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { sanitizeManifest, scanFoundry } from "../scripts/scanner.mjs";
+import { groupReferences, sanitizeManifest, scanFoundry } from "../scripts/scanner.mjs";
 
 function actorDocument(img = "art/a.png") {
   class MockActor {}
@@ -145,4 +145,67 @@ test("imported duplicate manifest entries are merged without duplicating referen
   const clean = sanitizeManifest(raw, "world-a");
   assert.equal(clean.entries.length, 1);
   assert.equal(clean.entries[0].refs.length, 1);
+});
+
+
+test("case-folded groups retain every reference's original path spelling", () => {
+  const upper = {
+    uuid: "Actor.A",
+    rootField: "img",
+    fieldPath: ["img"],
+    mode: "exact",
+    sourceFormat: "png",
+    oldValue: "Art/A.png",
+    newValue: "Art/A.webp",
+    oldPath: "Art/A.png",
+    newPath: "Art/A.webp"
+  };
+  const lower = {
+    ...upper,
+    uuid: "Actor.B",
+    oldValue: "art/a.png",
+    newValue: "art/a.webp",
+    oldPath: "art/a.png",
+    newPath: "art/a.webp"
+  };
+  const grouped = groupReferences([upper, lower], { caseInsensitive: true });
+  assert.equal(grouped.entries.length, 1);
+  assert.equal(grouped.entries[0].oldPath, "Art/A.png");
+  assert.deepEqual(grouped.entries[0].refs.map((ref) => ref.oldPath), ["Art/A.png", "art/a.png"]);
+});
+
+test("case-folded aliases survive manifest sanitization on case-insensitive platforms", () => {
+  installGame();
+  const upper = {
+    uuid: "Actor.A",
+    rootField: "img",
+    fieldPath: ["img"],
+    mode: "exact",
+    sourceFormat: "png",
+    oldValue: "Art/A.png",
+    newValue: "Art/A.webp",
+    oldPath: "Art/A.png",
+    newPath: "Art/A.webp"
+  };
+  const lower = {
+    ...upper,
+    uuid: "Actor.B",
+    oldValue: "art/a.png",
+    newValue: "art/a.webp",
+    oldPath: "art/a.png",
+    newPath: "art/a.webp"
+  };
+  const raw = {
+    type: "fbl-webp-migrator-manifest",
+    schemaVersion: 4,
+    manifestId: "m-case",
+    worldId: "world-a",
+    capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
+    entries: [{ oldPath: "Art/A.png", newPath: "Art/A.webp", refs: [upper, lower] }],
+    webpEntries: []
+  };
+  const clean = sanitizeManifest(raw, "world-a", { caseInsensitive: true });
+  assert.equal(clean.entries.length, 1);
+  assert.equal(clean.entries[0].refs.length, 2);
+  assert.deepEqual(clean.entries[0].refs.map((ref) => ref.oldPath), ["Art/A.png", "art/a.png"]);
 });

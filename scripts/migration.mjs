@@ -1,5 +1,6 @@
 import {
   PENDING_RELOCKS_SETTING,
+  MISSING_ASSET_PLACEHOLDER,
   REPORT_SCHEMA_VERSION,
   SUCCESS_STATUSES,
   VERIFIED_CONVERSION_STATUSES
@@ -48,16 +49,185 @@ function isWorldPack(pack) {
   return getPackPackageType(pack) === "world";
 }
 
-async function resolveDocument(uuid) {
+function parseRootUuid(uuid) {
   if (!uuid || typeof uuid !== "string") return null;
-  return globalThis.fromUuid?.(uuid) ?? null;
+  const parts = uuid.split(".");
+  if (parts[0] === "Compendium") {
+    if (parts.length !== 5 || !parts[1] || !parts[2] || !parts[3] || !parts[4]) return null;
+    return {
+      uuid,
+      pack: `${parts[1]}.${parts[2]}`,
+      documentName: parts[3],
+      id: parts[4],
+      compendium: true
+    };
+  }
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  return { uuid, pack: null, documentName: parts[0], id: parts[1], compendium: false };
+}
+
+function deriveRootUuid(uuid) {
+  if (!uuid || typeof uuid !== "string") return null;
+  const parts = uuid.split(".");
+  if (parts[0] === "Compendium") {
+    if (parts.length < 5) return null;
+    return parts.slice(0, 5).join(".");
+  }
+  if (parts.length < 2) return null;
+  return parts.slice(0, 2).join(".");
+}
+
+function embeddedChain(rootUuid, targetUuid) {
+  if (rootUuid === targetUuid) return [];
+  if (!targetUuid?.startsWith(`${rootUuid}.`)) return null;
+  const suffix = targetUuid.slice(rootUuid.length + 1).split(".");
+  if (!suffix.length || suffix.length % 2 !== 0) return null;
+  const chain = [];
+  for (let index = 0; index < suffix.length; index += 2) {
+    if (!suffix[index] || !suffix[index + 1]) return null;
+    chain.push({ documentName: suffix[index], id: suffix[index + 1] });
+  }
+  return chain;
+}
+
+async function resolveRootDocument(ref, { fresh = false } = {}) {
+  const declaredRoot = typeof ref?.rootUuid === "string" ? ref.rootUuid : null;
+  const declaredInfo = parseRootUuid(declaredRoot);
+  const declaredMatches = !!declaredInfo && (ref?.uuid === declaredRoot || ref?.uuid?.startsWith(`${declaredRoot}.`));
+  const rootUuid = declaredMatches ? declaredRoot : deriveRootUuid(ref?.uuid);
+  const rootInfo = parseRootUuid(rootUuid);
+  if (!rootInfo) throw new Error(`Некорректный root UUID: ${rootUuid ?? ref?.uuid ?? "unknown"}`);
+
+  if (rootInfo.compendium) {
+    const collection = typeof ref?.pack === "string" ? ref.pack : rootInfo.pack;
+    if (collection !== rootInfo.pack) throw new Error(`UUID и pack не совпадают: ${rootUuid}`);
+    const pack = game.packs?.get?.(collection) ?? null;
+    if (!pack) return { root: null, pack: null, rootUuid, rootInfo };
+
+    let root = null;
+    if (fresh && typeof pack.getDocuments === "function") {
+      const documents = await pack.getDocuments({ _id__in: [rootInfo.id] });
+      root = documents?.find?.((document) => document?.id === rootInfo.id) ?? null;
+    } else if (typeof pack.getDocument === "function") {
+      root = await pack.getDocument(rootInfo.id);
+    } else {
+      root = pack.get?.(rootInfo.id) ?? null;
+    }
+    return { root, pack, rootUuid, rootInfo };
+  }
+
+  const root = await (globalThis.fromUuid?.(rootUuid) ?? null);
+  return { root, pack: null, rootUuid, rootInfo };
+}
+
+function getEmbeddedDocumentSafe(parent, documentName, id) {
+  if (!parent) return null;
+  if (typeof parent.getEmbeddedDocument === "function") {
+    try {
+      const document = parent.getEmbeddedDocument(documentName, id, { invalid: true });
+      if (document) return document;
+    } catch {
+      // Fall through to a traversal lookup for systems with unusual embedded metadata.
+    }
+  }
+  try {
+    if (typeof parent.traverseEmbeddedDocuments === "function") {
+      for (const yielded of parent.traverseEmbeddedDocuments()) {
+        const document = Array.isArray(yielded) ? yielded[1] : (yielded?.document ?? yielded);
+        if (document?.documentName === documentName && document?.id === id && document?.parent === parent) return document;
+      }
+    }
+  } catch {
+    // A missing embedded document is handled by the caller as an ordinary resolution failure.
+  }
+  return null;
+}
+
+async function resolveReferenceContext(ref, { fresh = false } = {}) {
+  const rootResult = await resolveRootDocument(ref, { fresh });
+  const { root, pack, rootUuid } = rootResult;
+  if (!root) return { ...rootResult, target: null, parent: null, source: null, kind: "missing" };
+
+  const chain = embeddedChain(rootUuid, ref.uuid);
+  if (chain == null) throw new Error(`UUID ${ref.uuid} не принадлежит root document ${rootUuid}.`);
+  if (!chain.length) {
+    return { ...rootResult, target: root, parent: null, source: root.toObject(true), kind: "document" };
+  }
+
+  let current = root;
+  let parent = null;
+  for (let index = 0; index < chain.length; index += 1) {
+    const part = chain[index];
+    const isLast = index === chain.length - 1;
+
+    // ActorDelta is a special direct child of TokenDocument. Foundry recommends
+    // bulk/system migrations write the Token's `delta` property through the Scene
+    // rather than issuing direct ActorDelta database updates. This is especially
+    // important for Tokens stored inside Compendium Scenes.
+    if (isLast && part.documentName === "ActorDelta" && current?.documentName === "Token") {
+      const tokenSource = current.toObject(true);
+      const delta = tokenSource?.delta;
+      const deltaId = delta?._id ?? null;
+      if (deltaId && deltaId !== part.id) return { ...rootResult, target: null, parent: current, source: null, kind: "missing" };
+      return {
+        ...rootResult,
+        target: null,
+        parent: current,
+        token: current,
+        tokenParent: current.parent ?? parent,
+        source: delta && typeof delta === "object" ? deepClone(delta) : {},
+        kind: "actor-delta",
+        actorDeltaId: part.id
+      };
+    }
+
+    parent = current;
+    current = getEmbeddedDocumentSafe(current, part.documentName, part.id);
+    if (!current) return { ...rootResult, target: null, parent, source: null, kind: "missing" };
+  }
+
+  return { ...rootResult, target: current, parent, source: current.toObject(true), kind: "embedded" };
+}
+
+async function updateReferenceContext(context, updateData) {
+  const operation = { diff: true, recursive: true, render: false };
+  if (context.kind === "actor-delta") {
+    const token = context.token;
+    const scene = context.tokenParent;
+    if (!token?.id || !scene || typeof scene.updateEmbeddedDocuments !== "function") {
+      throw new Error("ActorDelta не может быть безопасно обновлен через родительский Token/Scene.");
+    }
+    const tokenUpdate = { _id: token.id };
+    for (const [key, value] of Object.entries(updateData)) tokenUpdate[`delta.${key}`] = value;
+    await scene.updateEmbeddedDocuments("Token", [tokenUpdate], operation);
+    return;
+  }
+
+  if (context.kind === "embedded") {
+    const target = context.target;
+    const parent = context.parent;
+    if (!target?.id || !target?.documentName || !parent || typeof parent.updateEmbeddedDocuments !== "function") {
+      throw new Error("Embedded document не может быть безопасно обновлен через родительский Document.");
+    }
+    await parent.updateEmbeddedDocuments(target.documentName, [{ _id: target.id, ...updateData }], operation);
+    return;
+  }
+
+  if (context.kind === "document" && context.target?.update) {
+    await context.target.update(updateData, operation);
+    return;
+  }
+  throw new Error("Документ не поддерживает безопасное обновление.");
 }
 
 export function referenceKey(ref) {
-  return `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}`;
+  const placeholder = ref?.migrationKind === "placeholder"
+    ? `|placeholder|${ref.placeholderSource}|${ref.placeholderValue}`
+    : "";
+  return `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}${placeholder}`;
 }
 
-export function validateReference(ref) {
+function validateStandardReferenceShape(ref) {
   return !!ref
     && typeof ref.uuid === "string"
     && isSafePathSegments(ref.fieldPath)
@@ -73,6 +243,14 @@ export function validateReference(ref) {
     && normalizePhysicalPath(ref.oldPath) === ref.oldPath
     && normalizeWebpPhysicalPath(ref.newPath) === ref.newPath
     && toWebpPhysicalPath(ref.oldPath) === ref.newPath;
+}
+
+export function validateReference(ref) {
+  if (!validateStandardReferenceShape(ref)) return false;
+  if (ref.migrationKind == null) return true;
+  return ref.migrationKind === "placeholder"
+    && (ref.placeholderSource === "old" || ref.placeholderSource === "new")
+    && ref.placeholderValue === MISSING_ASSET_PLACEHOLDER;
 }
 
 function validNumber(value, { minimum = 0 } = {}) {
@@ -287,9 +465,21 @@ export function createAssumedConversionReport(manifest) {
   return report;
 }
 
+function referenceOperationValues(ref, reverse = false) {
+  let source;
+  let target;
+  if (ref?.migrationKind === "placeholder") {
+    source = ref.placeholderSource === "new" ? ref.newValue : ref.oldValue;
+    target = ref.placeholderValue;
+  } else {
+    source = ref.oldValue;
+    target = ref.newValue;
+  }
+  return reverse ? { source: target, target: source } : { source, target };
+}
+
 function replaceReference(current, ref, reverse = false) {
-  const oldValue = reverse ? ref.newValue : ref.oldValue;
-  const newValue = reverse ? ref.oldValue : ref.newValue;
+  const { source: oldValue, target: newValue } = referenceOperationValues(ref, reverse);
   if (oldValue === newValue) return { status: "stale", value: current };
   if (ref.mode === "exact") {
     if (current === oldValue) return { status: "changed", value: newValue };
@@ -300,11 +490,18 @@ function replaceReference(current, ref, reverse = false) {
 }
 
 function verifyReference(source, ref, reverse = false) {
-  const expected = reverse ? ref.oldValue : ref.newValue;
-  const opposite = reverse ? ref.newValue : ref.oldValue;
+  const { source: opposite, target: expected } = referenceOperationValues(ref, reverse);
+  const current = getAtPath(source, ref.fieldPath);
+  if (ref?.migrationKind === "placeholder") {
+    if (ref.mode === "exact") return current === expected;
+    if (typeof current !== "string") return false;
+    const expectedPresent = replaceTextReference(current, expected, opposite).status === "changed";
+    const oppositePresent = replaceTextReference(current, opposite, expected).status === "changed";
+    return expectedPresent && !oppositePresent;
+  }
+
   const expectedPath = reverse ? ref.oldPath : ref.newPath;
   const oppositePath = reverse ? ref.newPath : ref.oldPath;
-  const current = getAtPath(source, ref.fieldPath);
   if (ref.mode === "exact") {
     if (current === expected) return true;
     const normalized = reverse ? normalizePhysicalPath(current) : normalizeWebpPhysicalPath(current);
@@ -461,20 +658,22 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
     for (let index = 0; index < groups.length; index += 1) {
       if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
       const [uuid, tasks] = groups[index];
-      let document;
+      const firstRef = tasks[0]?.ref;
+      let context;
       try {
-        document = await resolveDocument(uuid);
+        context = await resolveReferenceContext(firstRef);
       } catch (error) {
         for (const task of tasks) results.push({ ...task.resultBase, status: "error", error: error?.message ?? String(error) });
         continue;
       }
-      if (!document) {
+      if (!context?.source) {
         for (const task of tasks) results.push({ ...task.resultBase, status: "error", error: `Документ не найден: ${uuid}` });
         continue;
       }
 
-      onProgress?.({ current: index + 1, total: groups.length, label: document.name ?? document.id });
-      const pack = getPack(document);
+      const labelDocument = context.kind === "actor-delta" ? context.token : context.target;
+      onProgress?.({ current: index + 1, total: groups.length, label: labelDocument?.name ?? labelDocument?.id ?? uuid });
+      const pack = context.pack ?? getPack(context.root ?? context.target);
       if (pack && !isWorldPack(pack) && !options.allowPackageCompendiumWrites) {
         for (const task of tasks) results.push({
           ...task.resultBase,
@@ -492,8 +691,7 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
         continue;
       }
 
-      const source = document.toObject(true);
-      const working = deepClone(source);
+      const working = deepClone(context.source);
       const updateData = {};
       const pending = [];
 
@@ -534,22 +732,53 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
 
       if (!pending.length) continue;
 
+      let writeError = null;
       try {
-        await document.update(updateData, { diff: true, recursive: true, render: false });
-        const updatedSource = document.toObject(true);
-        for (const pendingResult of pending) {
-          if (verifyReference(updatedSource, pendingResult.ref, reverse)) pendingResult.status = "changed";
-          else {
-            pendingResult.status = "error";
-            pendingResult.error = reverse
-              ? "Откат применился, но итоговое значение не прошло проверку."
-              : "Документ обновился, но итоговое значение не прошло проверку.";
-          }
-        }
+        await updateReferenceContext(context, updateData);
       } catch (error) {
-        for (const pendingResult of pending) {
-          pendingResult.status = "error";
-          pendingResult.error = error?.message ?? String(error);
+        writeError = error;
+      }
+
+      // Never verify against the pre-update embedded instance. Compendium
+      // descendants in particular can remain stale in memory even after the
+      // database write succeeded. Re-read the root document, then traverse the
+      // newly loaded hierarchy before deciding whether a mutation is rollbackable.
+      await yieldToBrowser();
+      let verifiedContext = null;
+      let verificationError = null;
+      try {
+        verifiedContext = await resolveReferenceContext(firstRef, { fresh: true });
+      } catch (error) {
+        verificationError = error;
+      }
+
+      // A thrown update can still have reached the database before a later hook
+      // failed. Fresh verification is authoritative: if the expected value is
+      // present, record the change so rollback history is never lost.
+      const updatedSource = verifiedContext?.source ?? null;
+      for (const pendingResult of pending) {
+        if (updatedSource && verifyReference(updatedSource, pendingResult.ref, reverse)) {
+          pendingResult.status = "changed";
+          if (writeError) pendingResult.warning = `Foundry сообщил ошибку после записи: ${writeError?.message ?? String(writeError)}`;
+          continue;
+        }
+
+        pendingResult.status = "error";
+        if (verificationError) {
+          pendingResult.error = `Не удалось перечитать документ после записи: ${verificationError?.message ?? String(verificationError)}`;
+        } else if (!updatedSource) {
+          pendingResult.error = "Документ не удалось перечитать после записи; изменение не считается подтвержденным.";
+        } else if (writeError) {
+          pendingResult.error = writeError?.message ?? String(writeError);
+        } else {
+          const current = getAtPath(updatedSource, pendingResult.ref.fieldPath);
+          const original = referenceOperationValues(pendingResult.ref, reverse).source;
+          const stillOriginal = current === original;
+          pendingResult.error = stillOriginal
+            ? "Foundry принял операцию без ошибки, но сохраненное значение осталось прежним."
+            : (reverse
+              ? "Откат применился, но свежеперечитанное значение не прошло проверку."
+              : "Документ обновился, но свежеперечитанное значение не прошло проверку.");
         }
       }
 
@@ -687,7 +916,9 @@ export function sanitizeMigrationReportForRollback(raw, currentWorldId = game.wo
     dedupe.add(key);
     changedRefs.push({
       ...deepClone(input),
-      appliedDirection: input.appliedDirection === "reverse" ? "reverse" : "forward"
+      appliedDirection: input.appliedDirection === "placeholder"
+        ? "placeholder"
+        : input.appliedDirection === "reverse" ? "reverse" : "forward"
     });
   }
   if (!changedRefs.length) throw new Error("В migration report нет допустимых ссылок для отката.");
@@ -716,7 +947,9 @@ function mergeChangedReferences(previousRefs = [], currentRefs = []) {
     if (!validateReference(input)) continue;
     const ref = {
       ...deepClone(input),
-      appliedDirection: input.appliedDirection === "reverse" ? "reverse" : "forward"
+      appliedDirection: input.appliedDirection === "placeholder"
+        ? "placeholder"
+        : input.appliedDirection === "reverse" ? "reverse" : "forward"
     };
     const key = referenceKey(ref);
     const existing = map.get(key);
@@ -753,7 +986,7 @@ function currentReversePaths(report) {
     if (item?.direction === "webp-to-png" && typeof item.oldPath === "string") paths.add(item.oldPath);
   }
   for (const ref of report?.changedRefs ?? []) {
-    if (ref?.appliedDirection === "reverse" && typeof ref.oldPath === "string") paths.add(ref.oldPath);
+    if ((ref?.appliedDirection === "reverse" || ref?.appliedDirection === "placeholder") && typeof ref.oldPath === "string") paths.add(ref.oldPath);
   }
   return paths;
 }
@@ -769,21 +1002,36 @@ export function mergeMigrationReports(previous, current) {
     ...(current.sourceManifestIds ?? [current.sourceManifestId])
   ].filter(Boolean))];
 
+  const currentMigratedPaths = new Set((current.migrated ?? []).map((item) => item?.oldPath).filter(Boolean));
+  const currentSkippedPaths = new Set((current.skipped ?? []).map((item) => item?.oldPath).filter(Boolean));
+  const currentTouchedPaths = new Set([...currentMigratedPaths, ...currentSkippedPaths]);
   const reversePaths = currentReversePaths(current);
+
   const previousCleanup = (previous.cleanupFiles ?? []).filter((file) => {
     const manifestPath = file?.manifestOldPath ?? file?.oldPath;
-    return !reversePaths.has(manifestPath);
+    return !reversePaths.has(manifestPath) && !currentSkippedPaths.has(manifestPath);
   });
   const roots = [...new Set([previous.sourceDataRootId, current.sourceDataRootId].filter(Boolean))];
   const dataRootConflict = roots.length > 1;
+  const currentCleanup = (current.cleanupFiles ?? []).filter((file) => {
+    const manifestPath = file?.manifestOldPath ?? file?.oldPath;
+    return !currentSkippedPaths.has(manifestPath) && !reversePaths.has(manifestPath);
+  });
   const cleanupFiles = dataRootConflict
     ? []
-    : mergeByKey(previousCleanup, current.cleanupFiles, cleanupFileKey);
+    : mergeByKey(previousCleanup, currentCleanup, cleanupFileKey);
   const sourceDataRootId = dataRootConflict ? null : (roots[0] ?? null);
 
-  const migrated = mergeByKey(previous.migrated, current.migrated, (item) => item.oldPath ?? null);
-  const skipped = mergeByKey(previous.skipped, current.skipped, (item) => `${item.oldPath ?? ""}|${item.direction ?? ""}|${item.reason ?? ""}`);
-  const issues = mergeByKey(previous.issues, current.issues, (item) => [
+  // The newest result for a path is authoritative. A later failed or partial
+  // run revokes an older success and its cleanup permission; a later success
+  // removes an older skipped result.
+  const previousMigrated = (previous.migrated ?? []).filter((item) => !currentSkippedPaths.has(item?.oldPath));
+  const migrated = mergeByKey(previousMigrated, current.migrated, (item) => item.oldPath ?? null);
+  const previousSkipped = (previous.skipped ?? []).filter((item) => !currentTouchedPaths.has(item?.oldPath));
+  const skipped = mergeByKey(previousSkipped, current.skipped, (item) => item.oldPath ?? null);
+
+  const previousIssues = (previous.issues ?? []).filter((item) => !item?.oldPath || !currentTouchedPaths.has(item.oldPath));
+  const issues = mergeByKey(previousIssues, current.issues, (item) => [
     item.oldPath ?? "",
     item.uuid ?? "",
     item.fieldLabel ?? "",
@@ -799,6 +1047,26 @@ export function mergeMigrationReports(previous, current) {
     });
   }
 
+  const resultItems = [...migrated, ...skipped];
+  const explicitForward = migrated.filter((item) => item?.direction === "png-to-webp").length;
+  const reverse = migrated.filter((item) => item?.direction === "webp-to-png").length;
+  const placeholder = migrated.filter((item) => item?.direction === "missing-to-placeholder").length;
+  const forward = migrated.length - reverse - placeholder;
+  const summary = {
+    inputEntries: new Set(resultItems.map((item) => item?.oldPath).filter(Boolean)).size,
+    fullyMigratedPngPaths: forward,
+    consistencyForwardPaths: explicitForward,
+    consistencyReversePaths: reverse,
+    consistencyPlaceholderPaths: placeholder,
+    cleanupEligibleFiles: cleanupFiles.length,
+    skippedPngPaths: skipped.length,
+    changedReferences: changedRefs.length,
+    alreadyMigratedReferences: resultItems.reduce((sum, item) => sum + (Number(item?.already) || 0), 0),
+    staleReferences: issues.filter((item) => item?.status === "stale").length,
+    errors: issues.filter((item) => item?.status === "error" || item?.status === "skipped").length,
+    lockRestoreErrors: issues.filter((item) => item?.status === "lock-restore-error").length
+  };
+
   return {
     ...current,
     sourceManifestIds,
@@ -808,11 +1076,7 @@ export function mergeMigrationReports(previous, current) {
     skipped,
     changedRefs,
     issues,
-    summary: {
-      ...current.summary,
-      changedReferences: changedRefs.length,
-      cleanupEligibleFiles: cleanupFiles.length
-    }
+    summary
   };
 }
 
@@ -836,10 +1100,15 @@ export async function rollbackMigration(migrationReport, options = {}, { onProgr
     return [...byPath.values()];
   };
 
-  const forwardApplied = changedRefs.filter((ref) => ref.appliedDirection !== "reverse");
+  const placeholderApplied = changedRefs.filter((ref) => ref.appliedDirection === "placeholder");
+  const forwardApplied = changedRefs.filter((ref) => ref.appliedDirection !== "reverse" && ref.appliedDirection !== "placeholder");
   const reverseApplied = changedRefs.filter((ref) => ref.appliedDirection === "reverse");
   const results = [];
+  // Placeholder replacement is terminal: once a PNG/WEBP reference becomes an
+  // SVG it disappears from later scans. Roll it back first, then unwind any
+  // earlier PNG<->WEBP transition recorded for the same field.
   const phases = [
+    { refs: placeholderApplied, reverse: true },
     { refs: forwardApplied, reverse: true },
     { refs: reverseApplied, reverse: false }
   ].filter((phase) => phase.refs.length);

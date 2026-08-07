@@ -159,23 +159,45 @@ function selectedCompendiumPacks(options) {
     });
 }
 
-function groupReferences(references) {
+function isCaseInsensitivePlatform(platform = globalThis.process?.platform ?? globalThis.navigator?.platform ?? "") {
+  return /^(?:win32|darwin)$/i.test(platform) || /(?:win|mac)/i.test(platform);
+}
+
+function pathKey(value, caseInsensitive = isCaseInsensitivePlatform()) {
+  const text = String(value ?? "");
+  return caseInsensitive ? text.toLocaleLowerCase("en-US") : text;
+}
+
+function representativePaths(references, caseInsensitive = isCaseInsensitivePlatform()) {
+  const map = new Map();
+  for (const ref of references) {
+    const key = pathKey(ref?.oldPath, caseInsensitive);
+    if (key && !map.has(key)) map.set(key, ref.oldPath);
+  }
+  return map;
+}
+
+export function groupReferences(references, {
+  caseInsensitive = isCaseInsensitivePlatform(),
+  representatives = representativePaths(references, caseInsensitive)
+} = {}) {
   const groups = new Map();
-  const platform = globalThis.process?.platform ?? globalThis.navigator?.platform ?? "";
-  const caseInsensitive = /^(?:win32|darwin)$/i.test(platform) || /(?:win|mac)/i.test(platform);
   let caseFoldedAliases = 0;
   for (const inputRef of references) {
-    const key = caseInsensitive ? inputRef.oldPath.toLocaleLowerCase("en-US") : inputRef.oldPath;
+    const key = pathKey(inputRef.oldPath, caseInsensitive);
+    const representative = representatives.get(key) ?? inputRef.oldPath;
     if (!groups.has(key)) {
       groups.set(key, {
-        oldPath: inputRef.oldPath,
-        newPath: inputRef.newPath,
-        wildcard: /[*?]/.test(inputRef.oldPath),
+        oldPath: representative,
+        newPath: toWebpPhysicalPath(representative),
+        wildcard: /[*?]/.test(representative),
         refs: []
       });
-    } else if (groups.get(key).oldPath !== inputRef.oldPath) caseFoldedAliases += 1;
-    const group = groups.get(key);
-    group.refs.push({ ...inputRef, oldPath: group.oldPath, newPath: group.newPath });
+    }
+    if (representative !== inputRef.oldPath) caseFoldedAliases += 1;
+    // Keep the exact path spelling found in each document. Migration validation
+    // must compare the document field against its own value, not a group alias.
+    groups.get(key).refs.push({ ...inputRef });
   }
   return {
     entries: [...groups.values()].sort((a, b) => a.oldPath.localeCompare(b.oldPath)),
@@ -290,8 +312,10 @@ export async function scanFoundry(options = {}, { onProgress, signal } = {}) {
     await yieldToBrowser();
   }
 
-  const grouped = groupReferences(references);
-  const groupedWebp = groupReferences(webpReferences);
+  const caseInsensitive = isCaseInsensitivePlatform();
+  const representatives = representativePaths([...references, ...webpReferences], caseInsensitive);
+  const grouped = groupReferences(references, { caseInsensitive, representatives });
+  const groupedWebp = groupReferences(webpReferences, { caseInsensitive, representatives });
   const entries = grouped.entries;
   const webpEntries = groupedWebp.entries;
   const manifestId = createId();
@@ -353,15 +377,20 @@ export function sanitizeScanOptions(options = {}) {
   return output;
 }
 
-function sanitizeImportedRef(ref, entry, sourceFormat = "png") {
+function sanitizeImportedRef(ref, entry, sourceFormat = "png", caseInsensitive = isCaseInsensitivePlatform()) {
   if (!ref || typeof ref !== "object") return null;
   if (typeof ref.uuid !== "string" || !isSafePathSegments(ref.fieldPath)) return null;
   if (ref.fieldPath[0] !== ref.rootField || typeof ref.rootField !== "string") return null;
   if (ref.mode !== "exact" && ref.mode !== "text") return null;
   if (typeof ref.oldValue !== "string" || typeof ref.newValue !== "string" || ref.oldValue === ref.newValue) return null;
-  if (ref.oldPath !== entry.oldPath || ref.newPath !== entry.newPath) return null;
-  if (normalizePhysicalPath(ref.oldValue) !== entry.oldPath) return null;
-  if (normalizeWebpPhysicalPath(ref.newValue) !== entry.newPath) return null;
+
+  const oldPath = normalizePhysicalPath(ref.oldValue);
+  const newPath = normalizeWebpPhysicalPath(ref.newValue);
+  if (!oldPath || !newPath || toWebpPhysicalPath(oldPath) !== newPath) return null;
+  if (pathKey(oldPath, caseInsensitive) !== pathKey(entry.oldPath, caseInsensitive)) return null;
+  if (pathKey(newPath, caseInsensitive) !== pathKey(entry.newPath, caseInsensitive)) return null;
+  if (pathKey(ref.oldPath, caseInsensitive) !== pathKey(oldPath, caseInsensitive)) return null;
+  if (pathKey(ref.newPath, caseInsensitive) !== pathKey(newPath, caseInsensitive)) return null;
   if (toWebpReference(ref.oldValue) !== ref.newValue) return null;
   const normalizedSourceFormat = ref.sourceFormat === "webp" ? "webp" : "png";
   if (normalizedSourceFormat !== sourceFormat) return null;
@@ -383,28 +412,40 @@ function sanitizeImportedRef(ref, entry, sourceFormat = "png") {
     rootField: ref.rootField,
     oldValue: ref.oldValue,
     newValue: ref.newValue,
-    oldPath: entry.oldPath,
-    newPath: entry.newPath
+    oldPath,
+    newPath
   };
 }
 
-export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null) {
+export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null, { caseInsensitive = isCaseInsensitivePlatform() } = {}) {
   if (!raw || raw.type !== "fbl-webp-migrator-manifest") throw new Error("Это не manifest FBL WebP Migrator.");
   if (!raw.manifestId || typeof raw.manifestId !== "string") throw new Error("Manifest не содержит manifestId.");
   if (raw.worldId !== currentWorldId) throw new Error("Manifest относится к другому миру.");
 
   const ignored = [];
+  const rawEntries = [...(raw.entries ?? []), ...(raw.webpEntries ?? [])];
+  const representatives = new Map();
+  for (const input of rawEntries) {
+    const oldPath = normalizePhysicalPath(input?.oldPath);
+    if (!oldPath) continue;
+    const key = pathKey(oldPath, caseInsensitive);
+    if (!representatives.has(key)) representatives.set(key, oldPath);
+  }
+
   const sanitizeEntries = (inputs, sourceFormat) => {
     const map = new Map();
     for (const input of inputs ?? []) {
-      const oldPath = normalizePhysicalPath(input?.oldPath);
-      const newPath = toWebpPhysicalPath(input?.oldPath);
-      if (!oldPath || !newPath || input?.newPath !== newPath) {
+      const inputOldPath = normalizePhysicalPath(input?.oldPath);
+      const inputNewPath = normalizeWebpPhysicalPath(input?.newPath);
+      if (!inputOldPath || !inputNewPath || toWebpPhysicalPath(inputOldPath) !== inputNewPath) {
         ignored.push({ oldPath: input?.oldPath ?? null, sourceFormat, reason: "Некорректная пара oldPath/newPath." });
         continue;
       }
-      if (!map.has(oldPath)) {
-        map.set(oldPath, {
+      const key = pathKey(inputOldPath, caseInsensitive);
+      const oldPath = representatives.get(key) ?? inputOldPath;
+      const newPath = toWebpPhysicalPath(oldPath);
+      if (!map.has(key)) {
+        map.set(key, {
           oldPath,
           newPath,
           wildcard: /[*?]/.test(oldPath),
@@ -412,10 +453,10 @@ export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null) {
           dedupe: new Set()
         });
       }
-      const entry = map.get(oldPath);
+      const entry = map.get(key);
       let accepted = 0;
       for (const inputRef of input.refs ?? []) {
-        const ref = sanitizeImportedRef(inputRef, entry, sourceFormat);
+        const ref = sanitizeImportedRef(inputRef, entry, sourceFormat, caseInsensitive);
         if (!ref) continue;
         const key = `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}`;
         if (entry.dedupe.has(key)) continue;

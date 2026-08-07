@@ -1,4 +1,4 @@
-# FBL WebP Migrator 0.4.0
+# FBL WebP Migrator 0.4.1
 
 Целевая среда: Foundry VTT 13.351. Модуль не зависит от игровой системы.
 
@@ -101,6 +101,8 @@ consistency-report-<timestamp>.json
 
 В окне модуля выберите `Импорт consistency-report.json`.
 
+Если audit обнаружил путь, для которого **нет ни PNG, ни WEBP**, он помечается как `repair-to-placeholder`. В таком случае отдельная кнопка **«Заменить отсутствующие на заглушку»** заменит найденные ссылки Foundry на `icons/svg/mystery-man.svg`. Это отдельная операция, wildcard-пути не затрагиваются, а все изменения записываются в migration report и могут быть откатаны.
+
 Foundry не доверяет готовым флагам отчета. Разрешение на исправление пересчитывается из проверенных файлов и текущего manifest.
 
 ### Автоматически исправляемые случаи
@@ -166,6 +168,8 @@ node tools\convert-cwebp.js ^
   --cwebp "D:\libwebp\bin\cwebp.exe" ^
   --quality 85 ^
   --dry-run
+
+Если dry-run показывает `failed`, это не обязательно означает отсутствие файла. В 0.4.2 conversion report и UI показывают конкретную причину: неверный `--data` root, отсутствующий файл, не-PNG содержимое под `.png`-именем, поврежденный/устаревший существующий WEBP и т.д. Путь из manifest всегда разрешается как `<--data>/<путь из Foundry>`.
 ```
 
 ## 3. Конвертация
@@ -209,6 +213,8 @@ Foundry принимает только отчет для текущих `manife
 Кнопка `WEBP уже готовы` создает только внутреннее непроверенное предположение. Оно может менять пути после ручной проверки, но никогда не дает права на cleanup.
 
 Перед каждым изменением применяется stale guard. World compendiums при необходимости временно разблокируются. Намерение вернуть блокировку сохраняется в world setting. После аварийного закрытия Foundry модуль пытается восстановить замки при следующем запуске.
+
+Embedded documents обновляются через API их родителя. Для `ActorDelta` внутри Token используется запись `Token.delta` через Scene, а после записи Compendium Scene перечитывается из pack перед верификацией. Это важно для старых сцен и несвязанных токенов, где прямой `ActorDelta.update()` в Foundry v13 может быть ненадежным.
 
 System/module compendiums изменяются только при явном включении опасной опции и только если pack уже разблокирован.
 
@@ -285,6 +291,7 @@ game.modules.get("fbl-webp-migrator").api
 const manifest = await game.fblWebpMigrator.scanToManifest(options, hooks);
 const migration = await game.fblWebpMigrator.applyManifestReport(manifest, conversionReport, options, hooks);
 const repaired = await game.fblWebpMigrator.auditRepair(manifest, consistencyReport, options, hooks);
+const placeholders = await game.fblWebpMigrator.repairMissingAssets(manifest, consistencyReport, options, hooks);
 const rollback = await game.fblWebpMigrator.rollbackReport(migrationReport, options, hooks);
 ```
 

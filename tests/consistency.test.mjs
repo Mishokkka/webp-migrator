@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   applyConsistencyRepairs,
+  applyMissingPlaceholderRepairs,
   sanitizeConsistencyReport
 } from "../scripts/consistency.mjs";
 import { rollbackMigration } from "../scripts/migration.mjs";
@@ -181,3 +182,68 @@ test("incomplete file evidence cannot authorize a path change", () => {
   assert.equal(forward.status, "unresolved");
   assert.match(forward.files[0].webp.error, /metadata is incomplete/);
 });
+
+test("missing or non-numeric schema versions cannot authorize consistency repair", () => {
+  globalThis.game = { world: { id: "world-a", title: "World A" } };
+  const noManifestSchema = { ...manifest() };
+  delete noManifestSchema.schemaVersion;
+  assert.throws(() => sanitizeConsistencyReport(rawReport(), noManifestSchema, "world-a"), /полного сканирования WEBP/);
+
+  const noReportSchema = rawReport();
+  delete noReportSchema.schemaVersion;
+  assert.throws(() => sanitizeConsistencyReport(noReportSchema, manifest(), "world-a"), /устарел/);
+
+  const invalidReportSchema = { ...rawReport(), schemaVersion: "not-a-number" };
+  assert.throws(() => sanitizeConsistencyReport(invalidReportSchema, manifest(), "world-a"), /устарел/);
+});
+
+test("both-missing references can be replaced with the Foundry placeholder and rolled back", async () => {
+  const document = mockDocument({ img: "art/missing.png", system: { back: "art/missing.webp" } });
+  installMockGame(document);
+  const pngRef = ref("art/missing.png", "art/missing.webp", ["img"], "png");
+  const webpRef = ref("art/missing.png", "art/missing.webp", ["system", "back"], "webp");
+  const sourceManifest = {
+    type: "fbl-webp-migrator-manifest",
+    schemaVersion: 4,
+    version: "0.4.2",
+    manifestId: "manifest-a",
+    worldId: "world-a",
+    worldTitle: "World A",
+    capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
+    entries: [{ oldPath: "art/missing.png", newPath: "art/missing.webp", wildcard: false, refs: [pngRef] }],
+    webpEntries: [{ oldPath: "art/missing.png", newPath: "art/missing.webp", wildcard: false, refs: [webpRef] }]
+  };
+  const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
+  const raw = {
+    type: "fbl-webp-migrator-consistency-report",
+    schemaVersion: 4,
+    version: "0.4.2",
+    producer: "test",
+    sourceManifestId: "manifest-a",
+    sourceWorldId: "world-a",
+    dataRootId: `sha256:${"c".repeat(64)}`,
+    entries: [{
+      oldPath: "art/missing.png",
+      newPath: "art/missing.webp",
+      files: [{ oldPath: "art/missing.png", newPath: "art/missing.webp", png: missing, webp: missing }]
+    }]
+  };
+
+  const clean = sanitizeConsistencyReport(raw, sourceManifest, "world-a");
+  assert.equal(clean.summary.placeholderRepairPaths, 1);
+  assert.equal(clean.entries[0].placeholderAuthorized, true);
+  assert.equal(clean.entries[0].status, "repair-to-placeholder");
+
+  const migration = await applyMissingPlaceholderRepairs(sourceManifest, clean, {});
+  assert.equal(document.current().img, "icons/svg/mystery-man.svg");
+  assert.equal(document.current().system.back, "icons/svg/mystery-man.svg");
+  assert.equal(migration.summary.changedReferences, 2);
+  assert.equal(migration.summary.consistencyPlaceholderPaths, 1);
+  assert.deepEqual(migration.changedRefs.map((item) => item.appliedDirection), ["placeholder", "placeholder"]);
+
+  const rollback = await rollbackMigration(migration, {});
+  assert.equal(rollback.changed, 2);
+  assert.equal(document.current().img, "art/missing.png");
+  assert.equal(document.current().system.back, "art/missing.webp");
+});
+
