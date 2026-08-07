@@ -458,9 +458,9 @@ export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null, {
       for (const inputRef of input.refs ?? []) {
         const ref = sanitizeImportedRef(inputRef, entry, sourceFormat, caseInsensitive);
         if (!ref) continue;
-        const key = `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}`;
-        if (entry.dedupe.has(key)) continue;
-        entry.dedupe.add(key);
+        const refKey = `${ref.uuid}|${JSON.stringify(ref.fieldPath)}|${ref.mode}|${ref.oldValue}|${ref.newValue}`;
+        if (entry.dedupe.has(refKey)) continue;
+        entry.dedupe.add(refKey);
         entry.refs.push(ref);
         accepted += 1;
       }
