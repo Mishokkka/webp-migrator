@@ -9,6 +9,7 @@ import {
 } from "./migration.mjs";
 import {
   applyConsistencyRepairs,
+  applyMissingPlaceholderRepairs,
   sanitizeConsistencyReport
 } from "./consistency.mjs";
 import { sanitizeManifest, scanFoundry } from "./scanner.mjs";
@@ -142,7 +143,8 @@ function previewConversion(report) {
     status: entry.status,
     oldSize: entry.oldSize ?? "",
     newSize: entry.newSize ?? "",
-    savedPercent: Number.isFinite(entry.savedPercent) ? `${entry.savedPercent}%` : ""
+    savedPercent: Number.isFinite(entry.savedPercent) ? `${entry.savedPercent}%` : "",
+    detail: entry.error ?? entry.files?.find((file) => file.error)?.error ?? ""
   }));
 }
 
@@ -170,7 +172,9 @@ function previewConsistency(report) {
       ? tr("FWM.Consistency.ToWebp", "PNG → WEBP")
       : entry.reverseAuthorized
         ? tr("FWM.Consistency.ToPng", "WEBP → PNG")
-        : ""
+        : entry.placeholderAuthorized
+          ? tr("FWM.Consistency.ToPlaceholder", "→ Заглушка")
+          : ""
   }));
 }
 
@@ -227,7 +231,9 @@ function collectConsistencyIssues(report) {
       issues.push({
         scope: file.oldPath,
         status: file.category,
-        detail: [file.png?.error, file.webp?.error].filter(Boolean).join("; ")
+        detail: file.category === "both-missing" && entry.placeholderAuthorized
+          ? tr("FWM.Consistency.BothMissingRepairable", "Оба файла отсутствуют; доступна безопасная замена ссылки на заглушку.")
+          : [file.png?.error, file.webp?.error].filter(Boolean).join("; ")
       });
     }
   }
@@ -278,6 +284,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       exportManifest: WebpMigratorApp._onExportManifestAction,
       assumeConverted: WebpMigratorApp._onAssumeConvertedAction,
       applyConsistency: WebpMigratorApp._onApplyConsistencyAction,
+      applyMissingPlaceholder: WebpMigratorApp._onApplyMissingPlaceholderAction,
       applyReport: WebpMigratorApp._onApplyReportAction,
       exportMigrationReport: WebpMigratorApp._onExportMigrationReportAction,
       rollback: WebpMigratorApp._onRollbackAction,
@@ -349,6 +356,10 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         && !!state.manifest
         && !!state.consistencyReport
         && ((state.consistencyReport.summary?.forwardRepairPaths ?? 0) + (state.consistencyReport.summary?.reverseRepairPaths ?? 0) > 0),
+      canApplyMissingPlaceholder: !state.busy
+        && !!state.manifest
+        && !!state.consistencyReport
+        && (state.consistencyReport.summary?.placeholderRepairPaths ?? 0) > 0,
       canExportMigrationReport: !state.busy && !!state.migrationReport,
       canRollback: !state.busy && !!state.rollbackReport?.changedRefs?.length,
       canCancel: state.busy && !!this._activeController,
@@ -512,8 +523,8 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       this._viewState.rollbackSummary = null;
       this._setStatus(tr(
         "FWM.Status.ConsistencyImported",
-        `Проверка импортирована: ${report.summary.forwardRepairPaths} путей можно перевести на WEBP, ${report.summary.reverseRepairPaths} вернуть на PNG.`,
-        { forward: report.summary.forwardRepairPaths, reverse: report.summary.reverseRepairPaths }
+        `Проверка импортирована: ${report.summary.forwardRepairPaths} путей можно перевести на WEBP, ${report.summary.reverseRepairPaths} вернуть на PNG, ${report.summary.placeholderRepairPaths ?? 0} заменить на заглушку.`,
+        { forward: report.summary.forwardRepairPaths, reverse: report.summary.reverseRepairPaths, placeholder: report.summary.placeholderRepairPaths ?? 0 }
       ), { force: true });
     });
     if (input) input.value = "";
@@ -642,6 +653,49 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
     });
   }
 
+  static _onApplyMissingPlaceholderAction(event) {
+    event.preventDefault();
+    return this._runAction(tr("FWM.Status.ApplyingMissingPlaceholder", "Заменяю ссылки на давно удаленные файлы..."), async (options, signal) => {
+      const { manifest, consistencyReport } = this._viewState;
+      if (!manifest || !consistencyReport) throw new Error(tr("FWM.Errors.ManifestAndConsistencyRequired", "Нужны manifest и consistency report."));
+      const confirmed = await confirmAction({
+        title: tr("FWM.Confirm.MissingPlaceholderTitle", "Заменить отсутствующие файлы"),
+        content: `<p>${tr("FWM.Confirm.MissingPlaceholderBody", "Для путей, где отсутствуют и PNG, и WEBP, все найденные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.")}</p>`,
+        yes: tr("FWM.Actions.ApplyMissingPlaceholder", "Заменить на заглушку")
+      });
+      if (!confirmed) {
+        this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
+        return;
+      }
+      if (options.allowPackageCompendiumWrites) {
+        const packageConfirmed = await confirmAction({
+          title: tr("FWM.Confirm.PackageTitle", "Запись в system/module compendiums"),
+          content: `<p><strong>${tr("FWM.Confirm.PackageBody", "Будут изменены только уже разблокированные package packs. Обновление соответствующего модуля или системы может затереть изменения.")}</strong></p>`,
+          yes: tr("FWM.Actions.AcceptRisk", "Принять риск")
+        });
+        if (!packageConfirmed) {
+          this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
+          return;
+        }
+      }
+      const current = await applyMissingPlaceholderRepairs(manifest, consistencyReport, options, {
+        onProgress: ({ current: index, total, label }) => {
+          this._setStatus(tr("FWM.Status.ApplyingDocument", `Обновляю ${index}/${total}: ${label}`, { current: index, total, label }));
+        },
+        signal
+      });
+      const merged = mergeMigrationReports(this._viewState.rollbackReport, current);
+      this._viewState.migrationReport = merged;
+      this._viewState.rollbackReport = merged;
+      this._viewState.rollbackSummary = null;
+      this._setStatus(tr(
+        "FWM.Status.MissingPlaceholderApplied",
+        `На заглушку заменено ссылок: ${current.summary.changedReferences}; путей: ${current.summary.consistencyPlaceholderPaths ?? 0}.`,
+        { changed: current.summary.changedReferences, paths: current.summary.consistencyPlaceholderPaths ?? 0 }
+      ), { force: true });
+    });
+  }
+
   static _onApplyReportAction(event) {
     event.preventDefault();
     return this._runAction(tr("FWM.Status.Applying", "Применяю WEBP-пути..."), async (options, signal) => {
@@ -718,8 +772,11 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         signal
       });
       this._viewState.rollbackSummary = summary;
-      this._viewState.rollbackReport = null;
-      this._viewState.migrationReport = null;
+      const rollbackComplete = summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
+      if (rollbackComplete) {
+        this._viewState.rollbackReport = null;
+        this._viewState.migrationReport = null;
+      }
       this._setStatus(tr("FWM.Status.RollbackDone", `Возвращено ссылок: ${summary.changed}. Stale: ${summary.stale}. Ошибок: ${summary.errors}.`, {
         changed: summary.changed,
         stale: summary.stale,

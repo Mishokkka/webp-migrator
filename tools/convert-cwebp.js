@@ -6,7 +6,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
-const TOOL_VERSION = "0.4.0";
+const TOOL_VERSION = "0.4.2";
 const REPORT_SCHEMA_VERSION = 4;
 const CONVERSION_SUCCESS = new Set(["converted", "exists", "exists-missing-old"]);
 const HASH_RE = /^[a-f0-9]{64}$/i;
@@ -137,7 +137,11 @@ function readJson(file) {
 
 function writeJson(file, data) {
   const absolute = path.resolve(file);
-  fs.mkdirSync(path.dirname(absolute), { recursive: true });
+  const directory = path.dirname(absolute);
+  // On Windows, fs.mkdirSync("D:\\", {recursive:true}) can throw EPERM even
+  // though the drive root already exists. Only create a parent directory when
+  // it is actually missing. This also keeps root-level --out paths valid.
+  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(absolute, JSON.stringify(data, null, 2), "utf8");
 }
 
@@ -271,13 +275,15 @@ function readExact(fd, length, position) {
 
 function inspectPng(file) {
   let fd;
+  const invalid = (error, animated = false) => ({ valid: false, animated, error });
   try {
     const stat = fs.statSync(file);
-    if (!stat.isFile() || stat.size < 45) return { valid: false, animated: false };
+    if (!stat.isFile()) return invalid("Source path is not a regular file.");
+    if (stat.size < 45) return invalid("File is too small to be a complete PNG.");
     fd = fs.openSync(file, "r");
     const signature = readExact(fd, 8, 0);
     const expected = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    if (!signature?.equals(expected)) return { valid: false, animated: false };
+    if (!signature?.equals(expected)) return invalid("File has a .png path but does not contain a PNG signature.");
 
     let position = 8;
     let width = null;
@@ -288,37 +294,40 @@ function inspectPng(file) {
     let sawIend = false;
     while (position + 12 <= stat.size) {
       const header = readExact(fd, 8, position);
-      if (!header) return { valid: false, animated };
+      if (!header) return invalid("PNG chunk header is truncated.", animated);
       const length = header.readUInt32BE(0);
       const type = header.toString("ascii", 4, 8);
       const end = position + 12 + length;
-      if (end > stat.size) return { valid: false, animated };
-      if (!sawIhdr && type !== "IHDR") return { valid: false, animated };
+      if (end > stat.size) return invalid(`PNG chunk ${type || "<unknown>"} is truncated.`, animated);
+      if (!sawIhdr && type !== "IHDR") return invalid("PNG does not start with an IHDR chunk.", animated);
       if (type === "IHDR") {
-        if (sawIhdr || length !== 13) return { valid: false, animated };
+        if (sawIhdr || length !== 13) return invalid("PNG contains an invalid IHDR chunk.", animated);
         const data = readExact(fd, 13, position + 8);
-        if (!data) return { valid: false, animated };
+        if (!data) return invalid("PNG IHDR data is truncated.", animated);
         width = data.readUInt32BE(0);
         height = data.readUInt32BE(4);
         sawIhdr = true;
       } else if (type === "acTL") animated = true;
       else if (type === "IDAT") sawIdat = true;
       else if (type === "IEND") {
-        if (length !== 0) return { valid: false, animated };
+        if (length !== 0) return invalid("PNG contains an invalid IEND chunk.", animated);
         sawIend = true;
         position = end;
         break;
       }
       position = end;
     }
-    return {
-      valid: !!(width && height && sawIhdr && sawIdat && sawIend && position === stat.size),
-      width,
-      height,
-      animated
-    };
-  } catch {
-    return { valid: false, animated: false };
+    if (!width || !height || !sawIhdr) return invalid("PNG is missing valid dimensions or IHDR metadata.", animated);
+    if (!sawIdat) return invalid("PNG does not contain image data (IDAT).", animated);
+    if (!sawIend) return invalid("PNG does not contain a complete IEND chunk.", animated);
+
+    // Some otherwise decodable PNG files contain harmless bytes after IEND.
+    // cwebp/libpng tolerate these in practice, and rejecting them during a
+    // dry-run creates false negatives even though conversion succeeds. The
+    // complete file is still fingerprinted for cleanup safety.
+    return { valid: true, width, height, animated };
+  } catch (error) {
+    return invalid(error?.message ?? String(error));
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -432,7 +441,8 @@ function expandPattern(root, pattern, { cache = null } = {}) {
   const firstWildcard = relativePattern.search(/[*?]/);
   const slash = relativePattern.lastIndexOf("/", firstWildcard);
   const baseRelative = slash >= 0 ? relativePattern.slice(0, slash) : "";
-  const baseAbsolute = baseRelative ? toAbsolute(root, baseRelative) : root.real;
+  const baseAbsolute = baseRelative ? toAbsolute(root, baseRelative, { allowMissingLeaf: true }) : root.real;
+  if (!fs.existsSync(baseAbsolute) || !fs.statSync(baseAbsolute).isDirectory()) return [];
   const candidates = listFiles(root, baseAbsolute, cache);
   const regex = globToRegExp(relativePattern);
   return candidates
@@ -550,11 +560,11 @@ function convertConcrete(root, relativeOld, options) {
       const webpInfo = inspectWebp(newAbs);
       if (webpInfo.valid) return makeConcreteResult(relativeOld, relativeNew, "exists-missing-old", null, newAbs, null, webpInfo, { provenance: "existing" });
     }
-    return { oldPath: relativeOld, newPath: relativeNew, status: "failed", error: "PNG is missing and no valid WEBP exists." };
+    return { oldPath: relativeOld, newPath: relativeNew, status: "failed", error: `PNG is missing under the selected --data root and no valid WEBP exists: ${relativeOld}` };
   }
 
   const pngInfo = inspectPng(oldAbs);
-  if (!pngInfo.valid) return { oldPath: relativeOld, newPath: relativeNew, status: "failed", error: "Source file is not a valid PNG." };
+  if (!pngInfo.valid) return { oldPath: relativeOld, newPath: relativeNew, status: "failed", error: `Source file is not a valid PNG: ${pngInfo.error ?? "unknown PNG validation error"}` };
   if (pngInfo.animated) return makeConcreteResult(relativeOld, relativeNew, "skipped", oldAbs, newExists ? newAbs : null, pngInfo, newExists ? inspectWebp(newAbs) : null, {
     error: "APNG detected. Static cwebp conversion would discard animation."
   });
@@ -619,7 +629,7 @@ function convertManifestEntry(root, entry, options, walkCache = new Map()) {
   const oldPattern = normalizeRelativePath(entry.oldPath);
   const newPattern = normalizeRelativePath(entry.newPath);
   const expectedNew = pngToWebp(oldPattern);
-  if (newPattern !== expectedNew) throw new Error(`newPath must be the exact .webp counterpart of oldPath: ${entry.oldPath}`);
+  if (normalizeForHash(newPattern) !== normalizeForHash(expectedNew)) throw new Error(`newPath must be the exact .webp counterpart of oldPath: ${entry.oldPath}`);
   const oldFiles = expandPattern(root, oldPattern, { cache: walkCache }).filter((file) => /\.png$/i.test(file));
   const children = [];
 
@@ -663,10 +673,15 @@ function uniqueEntries(entries) {
     if (!entry?.oldPath || !entry?.newPath) continue;
     const oldPath = normalizeRelativePath(entry.oldPath);
     const newPath = normalizeRelativePath(entry.newPath);
-    if (pngToWebp(oldPath) !== newPath) throw new Error(`Invalid oldPath/newPath pair: ${entry.oldPath} -> ${entry.newPath}`);
-    const existing = map.get(oldPath);
-    if (existing && existing.newPath !== newPath) throw new Error(`Conflicting duplicate manifest path: ${oldPath}`);
-    map.set(oldPath, { oldPath, newPath });
+    if (normalizeForHash(pngToWebp(oldPath)) !== normalizeForHash(newPath)) {
+      throw new Error(`Invalid oldPath/newPath pair: ${entry.oldPath} -> ${entry.newPath}`);
+    }
+    const key = normalizeForHash(oldPath);
+    const existing = map.get(key);
+    if (existing && normalizeForHash(existing.newPath) !== normalizeForHash(newPath)) {
+      throw new Error(`Conflicting duplicate manifest path: ${oldPath}`);
+    }
+    if (!existing) map.set(key, { oldPath, newPath });
   }
   return [...map.values()];
 }
@@ -678,9 +693,12 @@ function uniqueAuditEntries(manifest) {
       if (!input?.oldPath || !input?.newPath) continue;
       const oldPath = normalizeRelativePath(input.oldPath);
       const newPath = normalizeRelativePath(input.newPath);
-      if (pngToWebp(oldPath) !== newPath) throw new Error(`Invalid oldPath/newPath pair: ${input.oldPath} -> ${input.newPath}`);
-      if (!map.has(oldPath)) {
-        map.set(oldPath, {
+      if (normalizeForHash(pngToWebp(oldPath)) !== normalizeForHash(newPath)) {
+        throw new Error(`Invalid oldPath/newPath pair: ${input.oldPath} -> ${input.newPath}`);
+      }
+      const key = normalizeForHash(oldPath);
+      if (!map.has(key)) {
+        map.set(key, {
           oldPath,
           newPath,
           wildcard: /[*?]/.test(oldPath),
@@ -688,8 +706,8 @@ function uniqueAuditEntries(manifest) {
           webpRefCount: 0
         });
       }
-      const pair = map.get(oldPath);
-      if (pair.newPath !== newPath) throw new Error(`Conflicting manifest pair: ${oldPath}`);
+      const pair = map.get(key);
+      if (normalizeForHash(pair.newPath) !== normalizeForHash(newPath)) throw new Error(`Conflicting manifest pair: ${oldPath}`);
       const count = Array.isArray(input.refs) ? input.refs.length : 0;
       if (format === "webp") pair.webpRefCount += count;
       else pair.pngRefCount += count;
@@ -773,28 +791,36 @@ function auditManifestEntry(root, entry, walkCache = new Map()) {
   const concrete = new Map();
   if (/[*?]/.test(oldPattern)) {
     for (const oldPath of expandPattern(root, oldPattern, { cache: walkCache }).filter((value) => /\.png$/i.test(value))) {
-      concrete.set(oldPath, { oldPath, newPath: pngToWebp(oldPath) });
+      concrete.set(normalizeForHash(oldPath), { oldPath, newPath: pngToWebp(oldPath) });
     }
     for (const newPath of expandPattern(root, newPattern, { cache: walkCache }).filter((value) => /\.webp$/i.test(value))) {
       const oldPath = newPath.replace(/\.webp$/i, ".png");
-      concrete.set(oldPath, { oldPath, newPath });
+      const key = normalizeForHash(oldPath);
+      const existing = concrete.get(key);
+      concrete.set(key, { oldPath: existing?.oldPath ?? oldPath, newPath });
     }
   } else {
-    concrete.set(oldPattern, { oldPath: oldPattern, newPath: newPattern });
+    concrete.set(normalizeForHash(oldPattern), { oldPath: oldPattern, newPath: newPattern });
   }
   const files = [...concrete.values()].sort((a, b) => a.oldPath.localeCompare(b.oldPath)).map((file) => auditConcrete(root, file.oldPath, file.newPath));
   const forwardAuthorized = entry.pngRefCount > 0 && files.length > 0 && files.every(auditForwardSafe);
   const reverseAuthorized = entry.webpRefCount > 0 && files.length > 0 && files.every(auditReverseSafe);
+  const placeholderAuthorized = !entry.wildcard
+    && (entry.pngRefCount + entry.webpRefCount) > 0
+    && files.length > 0
+    && files.every((file) => file.category === "both-missing");
   const currentPngValid = entry.pngRefCount === 0 || (files.length > 0 && files.every((file) => file.png.valid));
   const currentWebpValid = entry.webpRefCount === 0 || (files.length > 0 && files.every((file) => file.webp.valid));
   const status = forwardAuthorized
       ? "repair-to-webp"
       : reverseAuthorized
         ? "repair-to-png"
-        : currentPngValid && currentWebpValid
-          ? "consistent"
-          : "unresolved";
-  return { ...entry, status, forwardAuthorized, reverseAuthorized, files };
+        : placeholderAuthorized
+          ? "repair-to-placeholder"
+          : currentPngValid && currentWebpValid
+            ? "consistent"
+            : "unresolved";
+  return { ...entry, status, forwardAuthorized, reverseAuthorized, placeholderAuthorized, files };
 }
 
 function summarizeAudit(entries) {
@@ -808,6 +834,7 @@ function summarizeAudit(entries) {
     webpReferences: entries.reduce((sum, entry) => sum + entry.webpRefCount, 0),
     forwardRepairPaths: entries.filter((entry) => entry.forwardAuthorized).length,
     reverseRepairPaths: entries.filter((entry) => entry.reverseAuthorized).length,
+    placeholderRepairPaths: entries.filter((entry) => entry.placeholderAuthorized).length,
     consistentPaths: entries.filter((entry) => entry.status === "consistent").length,
     unresolvedPaths: entries.filter((entry) => entry.status === "unresolved" || entry.status === "conflict").length,
     categories
@@ -938,7 +965,7 @@ function audit(args) {
   const manifest = readJson(manifestPath);
   if (manifest.type !== "fbl-webp-migrator-manifest") throw new Error("Input is not a FBL WebP Migrator manifest.");
   if (!manifest.manifestId) throw new Error("Manifest is obsolete and has no manifestId. Rescan with module 0.4.0 or newer.");
-  if (Number(manifest.schemaVersion) < 4 || manifest.capabilities?.webpReferenceScan !== true || manifest.capabilities?.consistencyAudit !== true || !Array.isArray(manifest.webpEntries)) {
+  if (!(Number(manifest.schemaVersion) >= 4) || manifest.capabilities?.webpReferenceScan !== true || manifest.capabilities?.consistencyAudit !== true || !Array.isArray(manifest.webpEntries)) {
     throw new Error("Manifest has no complete WebP-reference scan. Rescan with module 0.4.0 or newer before using --audit.");
   }
 

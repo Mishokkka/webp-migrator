@@ -67,9 +67,10 @@ export function createId() {
 export function splitPathSuffix(value) {
   const source = String(value ?? "");
   const lower = source.toLowerCase();
-  const pngIndex = lower.lastIndexOf(".png");
-  if (pngIndex >= 0) {
-    const suffixIndex = pngIndex + 4;
+  for (const extension of [".png", ".webp"]) {
+    const extensionIndex = lower.lastIndexOf(extension);
+    if (extensionIndex < 0) continue;
+    const suffixIndex = extensionIndex + extension.length;
     if (source[suffixIndex] === "?" || source[suffixIndex] === "#") {
       return { path: source.slice(0, suffixIndex), suffix: source.slice(suffixIndex) };
     }

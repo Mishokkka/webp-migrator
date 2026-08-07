@@ -164,8 +164,20 @@
   "FWM.Confirm.ConsistencyBody": "Будут изменены только безопасно подтвержденные случаи: PNG-путь при существующем корректном WEBP и WEBP-путь при отсутствующем или поврежденном WEBP, если корректный PNG сохранился. Неоднозначные случаи останутся без изменений.",
   "FWM.Errors.ManifestAndConsistencyRequired": "Нужны manifest и consistency report.",
   "FWM.Status.ImportingConsistency": "Импортирую consistency report...",
-  "FWM.Status.ConsistencyImported": "Проверка импортирована: {forward} путей можно перевести на WEBP, {reverse} вернуть на PNG.",
+  "FWM.Status.ConsistencyImported": "Проверка импортирована: {forward} путей можно перевести на WEBP, {reverse} вернуть на PNG, {placeholder} заменить на заглушку.",
   "FWM.Status.ApplyingConsistency": "Исправляю рассинхронизированные пути...",
   "FWM.Status.ConsistencyApplied": "Исправлено ссылок: {changed}. На WEBP: {forward}. На PNG: {reverse}.",
-  "FWM.Common.CurrentFormat": "Текущий путь"
+  "FWM.Common.CurrentFormat": "Текущий формат",
+  "FWM.Status.LockRecoveryFailed": "Не удалось восстановить блокировки compendium: {count}. Подробности в консоли.",
+  "FWM.Status.LockRecoveryDone": "Восстановлены блокировки compendium: {count}.",
+  "FWM.Status.LockRecoveryUnexpected": "При восстановлении блокировок compendium произошла непредвиденная ошибка. Подробности в консоли.",
+  "FWM.Actions.ApplyMissingPlaceholder": "Заменить отсутствующие на заглушку",
+  "FWM.Summary.ToPlaceholder": "Можно заменить на заглушку:",
+  "FWM.Consistency.ToPlaceholder": "→ Заглушка",
+  "FWM.Consistency.PlaceholderHint": "Если и PNG, и WEBP физически отсутствуют, отдельная кнопка может заменить найденные ссылки на icons/svg/mystery-man.svg. Wildcard-пути не меняются.",
+  "FWM.Consistency.BothMissingRepairable": "Оба файла отсутствуют; доступна безопасная замена ссылки на заглушку.",
+  "FWM.Confirm.MissingPlaceholderTitle": "Заменить отсутствующие файлы",
+  "FWM.Confirm.MissingPlaceholderBody": "Для путей, где отсутствуют и PNG, и WEBP, все найденные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.",
+  "FWM.Status.ApplyingMissingPlaceholder": "Заменяю ссылки на давно удаленные файлы...",
+  "FWM.Status.MissingPlaceholderApplied": "На заглушку заменено ссылок: {changed}; путей: {paths}."
 }

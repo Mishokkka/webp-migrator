@@ -2,7 +2,7 @@
   "id": "fbl-webp-migrator",
   "title": "FBL WebP Migrator",
   "description": "Scans Foundry VTT documents and supported compendiums for local PNG and WebP references, audits them against disk, safely repairs mismatched paths, converts PNG through a verified cwebp workflow, and quarantines only fingerprinted PNG files.",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "compatibility": {
     "minimum": "13",
     "verified": "13.351",

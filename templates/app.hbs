@@ -59,7 +59,9 @@
     </label>
     <div class="fwm-actions">
       <button type="button" data-action="applyConsistency" {{#unless canApplyConsistency}}disabled{{/unless}}><i class="fas fa-screwdriver-wrench"></i> {{localize "FWM.Actions.ApplyConsistency"}}</button>
+      <button type="button" data-action="applyMissingPlaceholder" {{#unless canApplyMissingPlaceholder}}disabled{{/unless}}><i class="fas fa-user-slash"></i> {{localize "FWM.Actions.ApplyMissingPlaceholder"}}</button>
     </div>
+    <p class="fwm-muted">{{localize "FWM.Consistency.PlaceholderHint"}}</p>
   </section>
 
   <section class="fwm-panel">
@@ -138,6 +140,7 @@
       <span>{{localize "FWM.Summary.AuditFiles"}} <strong>{{consistencySummary.concreteFiles}}</strong></span>
       <span>{{localize "FWM.Summary.ToWebp"}} <strong>{{consistencySummary.forwardRepairPaths}}</strong></span>
       <span>{{localize "FWM.Summary.ToPng"}} <strong>{{consistencySummary.reverseRepairPaths}}</strong></span>
+      <span>{{localize "FWM.Summary.ToPlaceholder"}} <strong>{{consistencySummary.placeholderRepairPaths}}</strong></span>
       <span>{{localize "FWM.Summary.AuditUnresolved"}} <strong>{{consistencySummary.unresolvedPaths}}</strong></span>
       <span>{{localize "FWM.Summary.Ignored"}} <strong>{{consistencySummary.ignored}}</strong></span>
     </div>
@@ -183,10 +186,10 @@
     <p class="fwm-preview-meta">{{localize "FWM.Common.Showing"}} {{conversionPreviewMeta.shown}} / {{conversionPreviewMeta.total}}</p>
     <div class="fwm-table-wrap">
       <table>
-        <thead><tr><th>PNG</th><th>Status</th><th>Old</th><th>New</th><th>Saved</th></tr></thead>
+        <thead><tr><th>PNG</th><th>Status</th><th>Old</th><th>New</th><th>Saved</th><th>{{localize "FWM.Common.Detail"}}</th></tr></thead>
         <tbody>
           {{#each conversionPreview}}
-          <tr><td>{{oldPath}}</td><td>{{status}}</td><td>{{oldSize}}</td><td>{{newSize}}</td><td>{{savedPercent}}</td></tr>
+          <tr><td>{{oldPath}}</td><td>{{status}}</td><td>{{oldSize}}</td><td>{{newSize}}</td><td>{{savedPercent}}</td><td>{{detail}}</td></tr>
           {{/each}}
         </tbody>
       </table>
