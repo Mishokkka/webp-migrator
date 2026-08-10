@@ -174,10 +174,16 @@
   "FWM.Actions.ApplyMissingPlaceholder": "Replace missing with placeholder",
   "FWM.Summary.ToPlaceholder": "Repairable to placeholder:",
   "FWM.Consistency.ToPlaceholder": "→ Placeholder",
-  "FWM.Consistency.PlaceholderHint": "If both PNG and WebP are physically missing, the separate button can replace Foundry references with icons/svg/mystery-man.svg. Wildcard paths are not changed.",
+  "FWM.Consistency.PlaceholderHint": "If both PNG and WebP are physically missing, normal references can be replaced with icons/svg/mystery-man.svg. Image Hover → Specific image on hover is reset to its neutral path/image.png sentinel instead, so it does not override Actor/Token artwork. Wildcards are not changed.",
   "FWM.Consistency.BothMissingRepairable": "Both files are missing; the reference can be safely replaced with the placeholder.",
   "FWM.Confirm.MissingPlaceholderTitle": "Replace missing files",
-  "FWM.Confirm.MissingPlaceholderBody": "For paths where both PNG and WebP are absent, all discovered Foundry references will be replaced with icons/svg/mystery-man.svg. Wildcards and ambiguous cases are left unchanged. The operation is recorded in the migration report and can be rolled back.",
+  "FWM.Confirm.MissingPlaceholderBody": "For paths where both PNG and WebP are absent, normal Foundry references will be replaced with icons/svg/mystery-man.svg. Image Hover → Specific image on hover is reset to neutral path/image.png instead so it does not override Actor/Token artwork. Wildcards and ambiguous cases stay unchanged. The operation is recorded in the migration report and can be rolled back.",
   "FWM.Status.ApplyingMissingPlaceholder": "Replacing references to long-deleted files...",
-  "FWM.Status.MissingPlaceholderApplied": "Replaced references with placeholder: {changed}; paths: {paths}."
+  "FWM.Status.MissingPlaceholderApplied": "Processed missing references: {changed}; paths: {paths}.",
+  "FWM.Actions.RepairImageHover": "Repair Image Hover",
+  "FWM.Consistency.ImageHoverHint": "Image Hover compatibility: the repair button resets only Specific image on hover values that were incorrectly changed to icons/svg/mystery-man.svg by placeholder repair in 0.4.2/0.4.3.",
+  "FWM.Confirm.ImageHoverTitle": "Repair Image Hover overrides",
+  "FWM.Confirm.ImageHoverBody": "Versions 0.4.2/0.4.3 could write icons/svg/mystery-man.svg into Image Hover → Specific image on hover. Recovery now ignores ordinary scan-scope checkboxes: it checks all world Actors, all Tokens and nested ActorDelta documents in all world Scenes, plus world Actor/Scene compendiums. Only specificArt fields whose current value is EXACTLY that placeholder are reset to path/image.png. If you intentionally selected mystery-man.svg as Specific image on hover, those fields will also be reset.",
+  "FWM.Status.RepairingImageHover": "Repairing incorrect Image Hover overrides...",
+  "FWM.Status.ImageHoverRepaired": "Image Hover: found {found}, repaired {changed}, stale {stale}, errors {errors}."
 }

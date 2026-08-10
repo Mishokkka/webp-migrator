@@ -174,10 +174,16 @@
   "FWM.Actions.ApplyMissingPlaceholder": "Заменить отсутствующие на заглушку",
   "FWM.Summary.ToPlaceholder": "Можно заменить на заглушку:",
   "FWM.Consistency.ToPlaceholder": "→ Заглушка",
-  "FWM.Consistency.PlaceholderHint": "Если и PNG, и WEBP физически отсутствуют, отдельная кнопка может заменить найденные ссылки на icons/svg/mystery-man.svg. Wildcard-пути не меняются.",
+  "FWM.Consistency.PlaceholderHint": "Если и PNG, и WEBP физически отсутствуют, обычные ссылки можно заменить на icons/svg/mystery-man.svg. Для Image Hover → Specific image on hover используется нейтральный path/image.png, чтобы не перекрывать арт Actor/Token. Wildcard-пути не меняются.",
   "FWM.Consistency.BothMissingRepairable": "Оба файла отсутствуют; доступна безопасная замена ссылки на заглушку.",
   "FWM.Confirm.MissingPlaceholderTitle": "Заменить отсутствующие файлы",
-  "FWM.Confirm.MissingPlaceholderBody": "Для путей, где отсутствуют и PNG, и WEBP, все найденные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.",
+  "FWM.Confirm.MissingPlaceholderBody": "Для путей, где отсутствуют и PNG, и WEBP, обычные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Поле Image Hover → Specific image on hover вместо этого будет сброшено к нейтральному path/image.png, чтобы не перекрывать арт Actor/Token. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.",
   "FWM.Status.ApplyingMissingPlaceholder": "Заменяю ссылки на давно удаленные файлы...",
-  "FWM.Status.MissingPlaceholderApplied": "На заглушку заменено ссылок: {changed}; путей: {paths}."
+  "FWM.Status.MissingPlaceholderApplied": "Обработано отсутствующих ссылок: {changed}; путей: {paths}.",
+  "FWM.Actions.RepairImageHover": "Исправить Image Hover",
+  "FWM.Consistency.ImageHoverHint": "Совместимость Image Hover: кнопка исправления сбрасывает только Specific image on hover, ошибочно равный icons/svg/mystery-man.svg после старого placeholder-repair 0.4.2/0.4.3.",
+  "FWM.Confirm.ImageHoverTitle": "Исправить Image Hover overrides",
+  "FWM.Confirm.ImageHoverBody": "Версии 0.4.2/0.4.3 могли записать icons/svg/mystery-man.svg в Image Hover → Specific image on hover. Восстановление теперь независимо от обычных галочек сканирования: оно проверит все world Actors, все токены и вложенные ActorDelta во всех world Scenes, а также world Actor/Scene compendiums. Будут сброшены только поля specificArt, которые сейчас ТОЧНО равны этой заглушке. Они вернутся к path/image.png. Если вы намеренно выбирали mystery-man.svg именно как Specific image on hover, такие поля тоже будут сброшены.",
+  "FWM.Status.RepairingImageHover": "Исправляю ошибочные overrides Image Hover...",
+  "FWM.Status.ImageHoverRepaired": "Image Hover: найдено {found}, исправлено {changed}, stale {stale}, ошибок {errors}."
 }

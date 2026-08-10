@@ -10,6 +10,7 @@ import {
 import {
   applyConsistencyRepairs,
   applyMissingPlaceholderRepairs,
+  repairImageHoverSpecificArtOverrides,
   sanitizeConsistencyReport
 } from "./consistency.mjs";
 import { sanitizeManifest, scanFoundry } from "./scanner.mjs";
@@ -285,6 +286,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       assumeConverted: WebpMigratorApp._onAssumeConvertedAction,
       applyConsistency: WebpMigratorApp._onApplyConsistencyAction,
       applyMissingPlaceholder: WebpMigratorApp._onApplyMissingPlaceholderAction,
+      repairImageHover: WebpMigratorApp._onRepairImageHoverAction,
       applyReport: WebpMigratorApp._onApplyReportAction,
       exportMigrationReport: WebpMigratorApp._onExportMigrationReportAction,
       rollback: WebpMigratorApp._onRollbackAction,
@@ -360,6 +362,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         && !!state.manifest
         && !!state.consistencyReport
         && (state.consistencyReport.summary?.placeholderRepairPaths ?? 0) > 0,
+      canRepairImageHover: !state.busy,
       canExportMigrationReport: !state.busy && !!state.migrationReport,
       canRollback: !state.busy && !!state.rollbackReport?.changedRefs?.length,
       canCancel: state.busy && !!this._activeController,
@@ -660,7 +663,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       if (!manifest || !consistencyReport) throw new Error(tr("FWM.Errors.ManifestAndConsistencyRequired", "Нужны manifest и consistency report."));
       const confirmed = await confirmAction({
         title: tr("FWM.Confirm.MissingPlaceholderTitle", "Заменить отсутствующие файлы"),
-        content: `<p>${tr("FWM.Confirm.MissingPlaceholderBody", "Для путей, где отсутствуют и PNG, и WEBP, все найденные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.")}</p>`,
+        content: `<p>${tr("FWM.Confirm.MissingPlaceholderBody", "Для путей, где отсутствуют и PNG, и WEBP, обычные ссылки Foundry будут заменены на icons/svg/mystery-man.svg. Поле Image Hover → Specific image on hover вместо этого будет сброшено к его нейтральному значению path/image.png, чтобы не перекрывать арт Actor/Token. Wildcard-пути и неоднозначные случаи не изменяются. Операция записывается в migration report и поддерживает откат.")}</p>`,
         yes: tr("FWM.Actions.ApplyMissingPlaceholder", "Заменить на заглушку")
       });
       if (!confirmed) {
@@ -693,6 +696,46 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         `На заглушку заменено ссылок: ${current.summary.changedReferences}; путей: ${current.summary.consistencyPlaceholderPaths ?? 0}.`,
         { changed: current.summary.changedReferences, paths: current.summary.consistencyPlaceholderPaths ?? 0 }
       ), { force: true });
+    });
+  }
+
+  static _onRepairImageHoverAction(event) {
+    event.preventDefault();
+    return this._runAction(tr("FWM.Status.RepairingImageHover", "Исправляю ошибочные overrides Image Hover..."), async (options, signal) => {
+      const confirmed = await confirmAction({
+        title: tr("FWM.Confirm.ImageHoverTitle", "Исправить Image Hover overrides"),
+        content: `<p>${tr("FWM.Confirm.ImageHoverBody", "Версии 0.4.2/0.4.3 могли записать icons/svg/mystery-man.svg в Image Hover → Specific image on hover. Восстановление теперь независимо от обычных галочек сканирования: оно проверит все world Actors, все токены и вложенные ActorDelta во всех world Scenes, а также world Actor/Scene compendiums. Будут сброшены только поля specificArt, которые сейчас ТОЧНО равны этой заглушке. Они вернутся к path/image.png. Если вы намеренно выбирали mystery-man.svg именно как Specific image on hover, такие поля тоже будут сброшены.")}</p>`,
+        yes: tr("FWM.Actions.RepairImageHover", "Исправить Image Hover")
+      });
+      if (!confirmed) {
+        this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
+        return;
+      }
+      if (options.allowPackageCompendiumWrites) {
+        const packageConfirmed = await confirmAction({
+          title: tr("FWM.Confirm.PackageTitle", "Запись в system/module compendiums"),
+          content: `<p><strong>${tr("FWM.Confirm.PackageBody", "Будут изменены только уже разблокированные package packs. Обновление соответствующего модуля или системы может затереть изменения.")}</strong></p>`,
+          yes: tr("FWM.Actions.AcceptRisk", "Принять риск")
+        });
+        if (!packageConfirmed) {
+          this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
+          return;
+        }
+      }
+      const result = await repairImageHoverSpecificArtOverrides(options, {
+        onProgress: ({ current, total, label }) => {
+          if (current && total) this._setStatus(tr("FWM.Status.ApplyingDocument", `Обновляю ${current}/${total}: ${label}`, { current, total, label }));
+        },
+        signal
+      });
+      this._setStatus(tr(
+        "FWM.Status.ImageHoverRepaired",
+        `Image Hover: найдено ${result.scannedReferences}, исправлено ${result.changed}, stale ${result.stale}, ошибок ${result.errors}.`,
+        { found: result.scannedReferences, changed: result.changed, stale: result.stale, errors: result.errors }
+      ), { force: true });
+      if (result.errors || result.lockRestoreErrors) {
+        console.warn(`${MODULE_TITLE} | Image Hover compatibility repair issues`, result.issues);
+      }
     });
   }
 

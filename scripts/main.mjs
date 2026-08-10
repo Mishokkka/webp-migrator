@@ -10,6 +10,7 @@ import {
 import {
   applyConsistencyRepairs,
   applyMissingPlaceholderRepairs,
+  repairImageHoverSpecificArtOverrides,
   sanitizeConsistencyReport
 } from "./consistency.mjs";
 import { sanitizeManifest, sanitizeScanOptions, scanFoundry } from "./scanner.mjs";
@@ -67,6 +68,10 @@ function createApi() {
       const manifest = sanitizeManifest(manifestInput, game.world?.id ?? null);
       const report = sanitizeConsistencyReport(rawReport, manifest, game.world?.id ?? null);
       return applyMissingPlaceholderRepairs(manifest, report, options, hooks);
+    },
+    async repairImageHoverOverrides(options = {}, hooks = {}) {
+      requireGM();
+      return repairImageHoverSpecificArtOverrides(options, hooks);
     },
     async rollbackReport(rawReport, options = {}, hooks = {}) {
       requireGM();
