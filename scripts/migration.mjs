@@ -21,6 +21,7 @@ import {
   toWebpPhysicalPath
 } from "./path-utils.mjs";
 import { getPackPackageType } from "./scanner.mjs";
+import { isAllowedPlaceholderValue } from "./compatibility.mjs";
 
 const SHA256_RE = /^[a-f0-9]{64}$/i;
 const DATA_ROOT_ID_RE = /^sha256:[a-f0-9]{64}$/i;
@@ -250,7 +251,7 @@ export function validateReference(ref) {
   if (ref.migrationKind == null) return true;
   return ref.migrationKind === "placeholder"
     && (ref.placeholderSource === "old" || ref.placeholderSource === "new")
-    && ref.placeholderValue === MISSING_ASSET_PLACEHOLDER;
+    && isAllowedPlaceholderValue(ref, ref.placeholderValue, MISSING_ASSET_PLACEHOLDER);
 }
 
 function validNumber(value, { minimum = 0 } = {}) {

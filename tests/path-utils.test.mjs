@@ -75,6 +75,20 @@ test("collects exact, rich-text, bare filename, and array references", () => {
 });
 
 
+test("ignores Image Hover's path/image.png sentinel without hiding real specific-art paths", () => {
+  const source = {
+    img: "path/image.png",
+    prototypeToken: { flags: { "image-hover": { specificArt: "path/image.png" } } },
+    tokenOverride: { flags: { "image-hover": { specificArt: "portraits/hover.png" } } }
+  };
+  const refs = collectPngReferences(source, {
+    documentInfo: { uuid: "Actor.A", documentName: "Actor" }
+  });
+  assert.deepEqual(refs.map((ref) => ref.oldPath).sort(), ["path/image.png", "portraits/hover.png"]);
+  assert.equal(refs.some((ref) => ref.fieldLabel === "prototypeToken.flags.image-hover.specificArt"), false);
+  assert.equal(refs.some((ref) => ref.fieldLabel === "tokenOverride.flags.image-hover.specificArt"), true);
+});
+
 test("collects WebP references as canonical PNG/WebP pairs", () => {
   const source = {
     img: "actors/hero.webp ",

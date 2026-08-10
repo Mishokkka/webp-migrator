@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   applyConsistencyRepairs,
   applyMissingPlaceholderRepairs,
+  repairImageHoverSpecificArtOverrides,
   sanitizeConsistencyReport
 } from "../scripts/consistency.mjs";
 import { rollbackMigration } from "../scripts/migration.mjs";
@@ -247,6 +248,74 @@ test("both-missing references can be replaced with the Foundry placeholder and r
   assert.equal(document.current().system.back, "art/missing.webp");
 });
 
+test("missing Image Hover specific-art overrides reset to the module sentinel instead of mystery-man", async () => {
+  const document = mockDocument({
+    prototypeToken: { flags: { "image-hover": { specificArt: "art/deleted.png" } } }
+  });
+  installMockGame(document);
+  const hoverRef = ref(
+    "art/deleted.png",
+    "art/deleted.webp",
+    ["prototypeToken", "flags", "image-hover", "specificArt"],
+    "png"
+  );
+  const sourceManifest = {
+    type: "fbl-webp-migrator-manifest",
+    schemaVersion: 4,
+    version: "0.4.4",
+    manifestId: "manifest-hover",
+    worldId: "world-a",
+    worldTitle: "World A",
+    capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
+    entries: [{ oldPath: "art/deleted.png", newPath: "art/deleted.webp", wildcard: false, refs: [hoverRef] }],
+    webpEntries: []
+  };
+  const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
+  const raw = {
+    type: "fbl-webp-migrator-consistency-report",
+    schemaVersion: 4,
+    version: "0.4.4",
+    producer: "test",
+    sourceManifestId: "manifest-hover",
+    sourceWorldId: "world-a",
+    dataRootId: `sha256:${"c".repeat(64)}`,
+    entries: [{
+      oldPath: "art/deleted.png",
+      newPath: "art/deleted.webp",
+      files: [{ oldPath: "art/deleted.png", newPath: "art/deleted.webp", png: missing, webp: missing }]
+    }]
+  };
+
+  const clean = sanitizeConsistencyReport(raw, sourceManifest, "world-a");
+  const migration = await applyMissingPlaceholderRepairs(sourceManifest, clean, {});
+  assert.equal(document.current().prototypeToken.flags["image-hover"].specificArt, "path/image.png");
+  assert.equal(migration.changedRefs[0].placeholderValue, "path/image.png");
+
+  const rollback = await rollbackMigration(migration, {});
+  assert.equal(rollback.changed, 1);
+  assert.equal(document.current().prototypeToken.flags["image-hover"].specificArt, "art/deleted.png");
+});
+
+test("repairs legacy 0.4.2/0.4.3 mystery-man Image Hover overrides", async () => {
+  const document = mockDocument({
+    prototypeToken: { flags: { "image-hover": { specificArt: "icons/svg/mystery-man.svg" } } }
+  });
+  installMockGame(document);
+  globalThis.game.actors = new Map([[document.id, document]]);
+  globalThis.game.scenes = new Map();
+
+  const result = await repairImageHoverSpecificArtOverrides({
+    worldActors: true,
+    worldScenes: true,
+    worldCompendiums: false,
+    packageCompendiums: false
+  });
+  assert.equal(result.scannedReferences, 1);
+  assert.equal(result.changed, 1);
+  assert.equal(result.errors, 0);
+  assert.equal(document.current().prototypeToken.flags["image-hover"].specificArt, "path/image.png");
+});
+
 test("placeholder repair resolves case-only PNG/WEBP aliases on case-insensitive platforms", async () => {
   const originalProcess = globalThis.process;
   try {
@@ -300,3 +369,84 @@ test("placeholder repair resolves case-only PNG/WEBP aliases on case-insensitive
   }
 });
 
+
+test("Image Hover recovery ignores ordinary scan checkboxes and repairs embedded Token plus ActorDelta remnants", async () => {
+  let tokenData = {
+    _id: "T",
+    flags: { "image-hover": { specificArt: "icons/svg/mystery-man.svg" } },
+    delta: {
+      _id: "D",
+      prototypeToken: { flags: { "image-hover": { specificArt: "icons/svg/mystery-man.svg" } } }
+    }
+  };
+
+  const scene = {
+    uuid: "Scene.S",
+    id: "S",
+    documentName: "Scene",
+    name: "Scene S",
+    pack: null,
+    tokens: new Map(),
+    toObject: () => ({ _id: "S", tokens: [structuredClone(tokenData)] }),
+    getEmbeddedDocument(documentName, id) {
+      if (documentName === "Token" && id === "T") return token;
+      return null;
+    },
+    *traverseEmbeddedDocuments() {
+      yield ["Token", token];
+      yield ["ActorDelta", delta];
+    },
+    async updateEmbeddedDocuments(documentName, updates) {
+      assert.equal(documentName, "Token");
+      for (const update of updates) {
+        assert.equal(update._id, "T");
+        for (const [key, value] of Object.entries(update)) {
+          if (key !== "_id") applyDotted(tokenData, key, value);
+        }
+      }
+      return [token];
+    }
+  };
+  const token = {
+    uuid: "Scene.S.Token.T",
+    id: "T",
+    documentName: "Token",
+    name: "Token T",
+    parent: scene,
+    pack: null,
+    constructor: { metadata: { embedded: { ActorDelta: "delta" } } },
+    toObject: () => structuredClone(tokenData)
+  };
+  const delta = {
+    uuid: "Scene.S.Token.T.ActorDelta.D",
+    id: "D",
+    documentName: "ActorDelta",
+    name: "Delta D",
+    parent: token,
+    pack: null,
+    toObject: () => structuredClone(tokenData.delta)
+  };
+  scene.tokens.set(token.id, token);
+
+  globalThis.game = {
+    user: { isGM: true },
+    world: { id: "world-a", title: "World A" },
+    actors: new Map(),
+    scenes: new Map([[scene.id, scene]]),
+    packs: new Map()
+  };
+  globalThis.fromUuid = async (uuid) => uuid === scene.uuid ? scene : null;
+
+  const result = await repairImageHoverSpecificArtOverrides({
+    worldActors: false,
+    worldScenes: false,
+    worldCompendiums: false,
+    packageCompendiums: false
+  });
+
+  assert.equal(result.scannedReferences, 2);
+  assert.equal(result.changed, 2);
+  assert.equal(result.errors, 0);
+  assert.equal(tokenData.flags["image-hover"].specificArt, "path/image.png");
+  assert.equal(tokenData.delta.prototypeToken.flags["image-hover"].specificArt, "path/image.png");
+});

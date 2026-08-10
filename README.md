@@ -1,4 +1,4 @@
-# FBL WebP Migrator 0.4.3
+# FBL WebP Migrator 0.4.5
 
 Целевая среда: Foundry VTT 13.351. Модуль не зависит от игровой системы.
 
@@ -338,3 +338,12 @@ npm run check
 Набор включает тесты PNG/WEBP scanner, manifest/report sanitization, двусторонний consistency repair, stale guard, leaf updates, двусторонний rollback, объединение отчетов, compendium lock recovery, CLI parsing, APNG, структурную валидацию изображений, wildcard, symlink escape, atomic overwrite, hash-bound cleanup, quarantine и restore.
 
 Исторический сводный разбор исправлений 0.3.0 находится в `REVIEW_RESOLUTION_0.3.0.md`.
+
+## Image Hover 3.1
+
+Image Hover использует `flags.image-hover.specificArt = "path/image.png"` как специальное нейтральное значение: при нем модуль показывает обычный Actor/Token art. Это не реальный файл.
+
+Кнопка **«Исправить Image Hover»** в 0.4.5 выполняет полный recovery-проход по всем world Actors, world Scenes (Token и ActorDelta) и world Actor/Scene compendiums независимо от обычных галочек сканирования. FBL WebP Migrator 0.4.5 игнорирует этот sentinel при сканировании.
+
+Для отсутствующего реального `Specific image on hover` placeholder-repair теперь возвращает поле к `path/image.png`, а не к `icons/svg/mystery-man.svg`. Отдельная кнопка **«Исправить Image Hover»** исправляет ошибочные `mystery-man.svg` overrides, созданные placeholder-repair в 0.4.2/0.4.3. Она затрагивает только поля `flags.image-hover.specificArt`, которые сейчас точно равны `icons/svg/mystery-man.svg`. Для world compendiums включи соответствующую область сканирования перед запуском.
+

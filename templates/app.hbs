@@ -60,8 +60,10 @@
     <div class="fwm-actions">
       <button type="button" data-action="applyConsistency" {{#unless canApplyConsistency}}disabled{{/unless}}><i class="fas fa-screwdriver-wrench"></i> {{localize "FWM.Actions.ApplyConsistency"}}</button>
       <button type="button" data-action="applyMissingPlaceholder" {{#unless canApplyMissingPlaceholder}}disabled{{/unless}}><i class="fas fa-user-slash"></i> {{localize "FWM.Actions.ApplyMissingPlaceholder"}}</button>
+      <button type="button" data-action="repairImageHover" {{#unless canRepairImageHover}}disabled{{/unless}}><i class="fas fa-image"></i> {{localize "FWM.Actions.RepairImageHover"}}</button>
     </div>
     <p class="fwm-muted">{{localize "FWM.Consistency.PlaceholderHint"}}</p>
+    <p class="fwm-muted">{{localize "FWM.Consistency.ImageHoverHint"}}</p>
   </section>
 
   <section class="fwm-panel">

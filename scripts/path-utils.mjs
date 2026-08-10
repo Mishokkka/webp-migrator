@@ -1,4 +1,5 @@
 import { DANGEROUS_PATH_SEGMENTS } from "./constants.mjs";
+import { isImageHoverSpecificArtSentinel } from "./compatibility.mjs";
 
 const EXTERNAL_SCHEME_RE = /^(?:https?:|data:|blob:|file:|ftp:|s3:)/i;
 const PNG_SUFFIX_RE = /\.png(?=([?#].*)?$)/i;
@@ -267,6 +268,9 @@ export function collectPngReferences(source, {
   function walk(value, pathSegments, keyHint) {
     if (typeof value === "string") {
       const trimmed = value.trim();
+      // Image Hover 3.1 uses path/image.png as a semantic "no override" sentinel.
+      // It is not a real asset and must never enter conversion/consistency workflows.
+      if (isImageHoverSpecificArtSentinel(trimmed, pathSegments)) return;
       if (looksLikeAssetPath(trimmed, keyHint)) {
         const physicalPath = normalizePhysicalPath(trimmed);
         const newPhysicalPath = toWebpPhysicalPath(trimmed);

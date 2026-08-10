@@ -1,4 +1,4 @@
-import { MISSING_ASSET_PLACEHOLDER, REPORT_SCHEMA_VERSION } from "./constants.mjs";
+import { FALLBACK_EMBEDDED_FIELDS, MISSING_ASSET_PLACEHOLDER, REPORT_SCHEMA_VERSION } from "./constants.mjs";
 import {
   deepClone,
   globToRegExp,
@@ -8,6 +8,12 @@ import {
   toWebpPhysicalPath
 } from "./path-utils.mjs";
 import { processDocumentTasks, validateReference } from "./migration.mjs";
+import { getPackPackageType, iterateDocumentTree } from "./scanner.mjs";
+import {
+  IMAGE_HOVER_SPECIFIC_ART_SENTINEL,
+  IMAGE_HOVER_SPECIFIC_ART_SENTINEL_WEBP,
+  missingAssetReplacementForRef
+} from "./compatibility.mjs";
 
 const DATA_ROOT_ID_RE = /^sha256:[a-f0-9]{64}$/i;
 const SHA256_RE = /^[a-f0-9]{64}$/i;
@@ -378,7 +384,7 @@ function placeholderRefsForEntry(manifest, reportEntry) {
       ...deepClone(ref),
       migrationKind: "placeholder",
       placeholderSource: "old",
-      placeholderValue: MISSING_ASSET_PLACEHOLDER
+      placeholderValue: missingAssetReplacementForRef(ref, MISSING_ASSET_PLACEHOLDER)
     });
   }
   for (const ref of webpEntry?.refs ?? []) {
@@ -386,7 +392,7 @@ function placeholderRefsForEntry(manifest, reportEntry) {
       ...deepClone(ref),
       migrationKind: "placeholder",
       placeholderSource: "new",
-      placeholderValue: MISSING_ASSET_PLACEHOLDER
+      placeholderValue: missingAssetReplacementForRef(ref, MISSING_ASSET_PLACEHOLDER)
     });
   }
   return refs;
@@ -437,7 +443,7 @@ export async function applyMissingPlaceholderRepairs(manifest, consistencyReport
     sourceDataRootId: consistencyReport.dataRootId ?? null,
     worldId: manifest.worldId,
     worldTitle: manifest.worldTitle,
-    options: { ...writeOptions, consistencyRepair: true, missingAssetPlaceholder: MISSING_ASSET_PLACEHOLDER },
+    options: { ...writeOptions, consistencyRepair: true, missingAssetPlaceholder: MISSING_ASSET_PLACEHOLDER, imageHoverSpecificArtFallback: IMAGE_HOVER_SPECIFIC_ART_SENTINEL },
     summary: {
       inputEntries: entries.length,
       fullyMigratedPngPaths: 0,
@@ -461,3 +467,187 @@ export async function applyMissingPlaceholderRepairs(manifest, consistencyReport
   };
 }
 
+
+
+function collectionValues(collection) {
+  if (!collection) return [];
+  if (Array.isArray(collection)) return collection;
+  if (typeof collection.values === "function") return [...collection.values()];
+  if (Symbol.iterator in Object(collection)) return [...collection];
+  return [];
+}
+
+function imageHoverLegacyRecoveryRef(document, root, pack, fieldPath) {
+  const oldPath = normalizePhysicalPath(IMAGE_HOVER_SPECIFIC_ART_SENTINEL);
+  const newPath = normalizeWebpPhysicalPath(IMAGE_HOVER_SPECIFIC_ART_SENTINEL_WEBP);
+  return {
+    uuid: document.uuid,
+    documentId: document.id,
+    documentName: document.documentName,
+    documentLabel: document.name ?? document.label ?? document.id,
+    rootUuid: root.uuid,
+    rootDocumentName: root.documentName,
+    rootLabel: root.name ?? root.label ?? root.id,
+    pack: pack?.collection ?? document.pack ?? null,
+    packTitle: pack?.title ?? null,
+    packageType: pack ? getPackPackageType(pack) : "world",
+    sourceFormat: "png",
+    mode: "exact",
+    fieldPath: [...fieldPath],
+    fieldLabel: fieldPath.map(String).join("."),
+    rootField: fieldPath[0],
+    oldValue: IMAGE_HOVER_SPECIFIC_ART_SENTINEL,
+    newValue: IMAGE_HOVER_SPECIFIC_ART_SENTINEL_WEBP,
+    oldPath,
+    newPath,
+    migrationKind: "placeholder",
+    placeholderSource: "old",
+    // 0.4.2/0.4.3 used this generic value by mistake. Running the
+    // reconstructed operation in reverse safely restores Image Hover's sentinel.
+    placeholderValue: MISSING_ASSET_PLACEHOLDER
+  };
+}
+
+function imageHoverEmbeddedRootFields(document) {
+  const fields = new Set(FALLBACK_EMBEDDED_FIELDS[document?.documentName] ?? []);
+  const embedded = document?.constructor?.metadata?.embedded;
+  if (embedded && typeof embedded === "object") {
+    for (const value of Object.values(embedded)) {
+      if (typeof value === "string" && value) fields.add(value);
+    }
+  }
+  return fields;
+}
+
+function isImageHoverSpecificArtPath(fieldPath) {
+  if (!Array.isArray(fieldPath) || fieldPath.length < 3) return false;
+  const offset = fieldPath.length - 3;
+  return fieldPath[offset] === "flags"
+    && fieldPath[offset + 1] === "image-hover"
+    && fieldPath[offset + 2] === "specificArt";
+}
+
+function collectImageHoverRefsFromDocument(document, root, pack = null) {
+  const source = document?.toObject?.(true);
+  if (!source || typeof source !== "object") return [];
+  const refs = [];
+  const seenObjects = new WeakSet();
+  const skipRootFields = imageHoverEmbeddedRootFields(document);
+
+  const walk = (value, fieldPath) => {
+    if (typeof value === "string") {
+      if (value === MISSING_ASSET_PLACEHOLDER && isImageHoverSpecificArtPath(fieldPath)) {
+        refs.push(imageHoverLegacyRecoveryRef(document, root, pack, fieldPath));
+      }
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    if (seenObjects.has(value)) return;
+    seenObjects.add(value);
+
+    if (Array.isArray(value)) {
+      for (let index = 0; index < value.length; index += 1) walk(value[index], [...fieldPath, index]);
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      // Embedded documents are traversed as their own Documents. Skipping the
+      // root collection here avoids duplicate refs and, more importantly, avoids
+      // trying to write array-index paths such as Scene.tokens.0.flags....
+      if (fieldPath.length === 0 && skipRootFields.has(key)) continue;
+      walk(child, [...fieldPath, key]);
+    }
+  };
+
+  walk(source, []);
+  return refs;
+}
+
+function collectImageHoverRefsFromRoot(root, pack = null) {
+  const refs = [];
+  for (const document of iterateDocumentTree(root)) {
+    refs.push(...collectImageHoverRefsFromDocument(document, root, pack));
+  }
+  return refs;
+}
+
+async function collectImageHoverLegacyPlaceholderRefs(options = {}, { onProgress, signal } = {}) {
+  const refs = [];
+
+  // This is a recovery operation for damage created by 0.4.2/0.4.3, not a
+  // normal scoped scan. Always inspect every world Actor and Scene so a stale
+  // checkbox cannot leave some damaged tokens behind.
+  const worldRoots = [
+    ...collectionValues(game.actors),
+    ...collectionValues(game.scenes)
+  ];
+  for (let index = 0; index < worldRoots.length; index += 1) {
+    if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+    const root = worldRoots[index];
+    refs.push(...collectImageHoverRefsFromRoot(root));
+    onProgress?.({
+      phase: "scan",
+      current: index + 1,
+      total: worldRoots.length,
+      label: root.name ?? root.id
+    });
+    if (index % 20 === 19) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  // World Actor/Scene packs are also user-owned data and may have been damaged
+  // by the old placeholder repair. Always include them. Package packs remain
+  // opt-in because they belong to modules/systems and may be overwritten by an
+  // update of that package.
+  const includePackagePacks = options.packageCompendiums === true;
+  const packs = collectionValues(game.packs).filter((pack) => {
+    if (pack?.documentName !== "Actor" && pack?.documentName !== "Scene") return false;
+    const type = getPackPackageType(pack);
+    return type === "world" || ((type === "module" || type === "system") && includePackagePacks);
+  });
+
+  for (let packIndex = 0; packIndex < packs.length; packIndex += 1) {
+    if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+    const pack = packs[packIndex];
+    const documents = await pack.getDocuments();
+    for (let documentIndex = 0; documentIndex < documents.length; documentIndex += 1) {
+      if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+      refs.push(...collectImageHoverRefsFromRoot(documents[documentIndex], pack));
+      if (documentIndex % 20 === 19) await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    onProgress?.({ phase: "pack", current: packIndex + 1, total: packs.length, label: pack.title ?? pack.collection });
+  }
+
+  // The same field can surface through unusual system traversal APIs more than
+  // once. Deduplicate by actual document UUID + exact field path before writing.
+  const unique = new Map();
+  for (const ref of refs) {
+    const key = `${ref.uuid}|${JSON.stringify(ref.fieldPath)}`;
+    if (!unique.has(key)) unique.set(key, ref);
+  }
+  return [...unique.values()];
+}
+
+export async function repairImageHoverSpecificArtOverrides(options = {}, { onProgress, signal } = {}) {
+  if (!game.user?.isGM) throw new Error("Исправление Image Hover доступно только GM.");
+  const refs = await collectImageHoverLegacyPlaceholderRefs(options, { onProgress, signal });
+  if (!refs.length) {
+    return { scannedReferences: 0, changed: 0, already: 0, stale: 0, errors: 0, lockRestoreErrors: 0, issues: [] };
+  }
+
+  const entry = {
+    oldPath: IMAGE_HOVER_SPECIFIC_ART_SENTINEL,
+    newPath: IMAGE_HOVER_SPECIFIC_ART_SENTINEL_WEBP,
+    wildcard: false,
+    refs
+  };
+  const writeOptions = normalizedWriteOptions(options);
+  const { results } = await processDocumentTasks([entry], writeOptions, true, { onProgress, signal });
+  return {
+    scannedReferences: refs.length,
+    changed: results.filter((result) => result.status === "changed").length,
+    already: results.filter((result) => result.status === "already").length,
+    stale: results.filter((result) => result.status === "stale").length,
+    errors: results.filter((result) => result.status === "error" || result.status === "skipped").length,
+    lockRestoreErrors: results.filter((result) => result.status === "lock-restore-error").length,
+    issues: results.filter((result) => !["changed", "already"].includes(result.status))
+  };
+}

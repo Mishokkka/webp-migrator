@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.5
+
+- Исправлено неполное восстановление Image Hover: recovery больше не зависит от обычных галочек Actors/Scenes/World Compendiums.
+- Recovery рекурсивно проходит реальное дерево документов world Actors и world Scenes, включая embedded Token и ActorDelta, и автоматически проверяет world Actor/Scene compendiums.
+- Поиск восстановления теперь находит `flags.image-hover.specificArt = icons/svg/mystery-man.svg` на любой допустимой вложенности, но не трогает обычные `img`/`texture.src` и другие поля с `mystery-man.svg`.
+- Добавлена дедупликация recovery-ссылок по UUID + fieldPath и regression-тест для Token + ActorDelta.
+
+## 0.4.4
+
+- Исправлена совместимость с Image Hover 3.1: `path/image.png` в `flags.image-hover.specificArt` распознается как sentinel «без override» и больше не попадает в PNG audit/conversion.
+- Placeholder repair больше не записывает `icons/svg/mystery-man.svg` в `Specific image on hover`; отсутствующий override возвращается к `path/image.png`, чтобы Image Hover продолжал использовать обычный Actor/Token art.
+- Добавлена кнопка и API `game.fblWebpMigrator.repairImageHoverOverrides()` для восстановления ошибочных `mystery-man.svg` overrides, созданных версиями 0.4.2/0.4.3.
+- Старые migration reports с ошибочным Image Hover placeholder остаются валидными для rollback.
+- Добавлены regression-тесты для Image Hover sentinel, missing override и восстановления уже поврежденных данных.
+
 ## 0.4.3
 
 ### Исправления ревью PR #3
