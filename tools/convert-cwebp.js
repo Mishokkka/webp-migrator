@@ -6,10 +6,11 @@ const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
-const TOOL_VERSION = "0.4.2";
+const TOOL_VERSION = "0.4.7";
 const REPORT_SCHEMA_VERSION = 4;
 const CONVERSION_SUCCESS = new Set(["converted", "exists", "exists-missing-old"]);
 const HASH_RE = /^[a-f0-9]{64}$/i;
+const FOUNDRY_V13_PUBLIC_DIRS = new Set(["cards", "css", "fonts", "icons", "lang", "scripts", "sounds", "ui"]);
 const ARG_SPEC = Object.freeze({
   manifest: "value",
   audit: "value",
@@ -33,6 +34,14 @@ const ARG_SPEC = Object.freeze({
   "include-local-paths": "boolean",
   "force-data-root": "boolean"
 });
+
+function isFoundryCorePublicPath(value) {
+  let normalized = String(value ?? "").trim().replace(/\\/g, "/");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  normalized = normalized.replace(/^\/+/, "").replace(/\/{2,}/g, "/");
+  const first = normalized.split("/").find(Boolean)?.toLowerCase();
+  return !!first && FOUNDRY_V13_PUBLIC_DIRS.has(first);
+}
 
 function parseArgs(argv) {
   const args = {};
@@ -673,6 +682,7 @@ function uniqueEntries(entries) {
     if (!entry?.oldPath || !entry?.newPath) continue;
     const oldPath = normalizeRelativePath(entry.oldPath);
     const newPath = normalizeRelativePath(entry.newPath);
+    if (isFoundryCorePublicPath(oldPath) || isFoundryCorePublicPath(newPath)) continue;
     if (normalizeForHash(pngToWebp(oldPath)) !== normalizeForHash(newPath)) {
       throw new Error(`Invalid oldPath/newPath pair: ${entry.oldPath} -> ${entry.newPath}`);
     }
@@ -693,6 +703,7 @@ function uniqueAuditEntries(manifest) {
       if (!input?.oldPath || !input?.newPath) continue;
       const oldPath = normalizeRelativePath(input.oldPath);
       const newPath = normalizeRelativePath(input.newPath);
+      if (isFoundryCorePublicPath(oldPath) || isFoundryCorePublicPath(newPath)) continue;
       if (normalizeForHash(pngToWebp(oldPath)) !== normalizeForHash(newPath)) {
         throw new Error(`Invalid oldPath/newPath pair: ${input.oldPath} -> ${input.newPath}`);
       }

@@ -3,6 +3,7 @@ import { WebpMigratorApp } from "./app.mjs";
 import {
   applyMigration,
   recoverPendingPackLocks,
+  rollbackCorePublicPlaceholders,
   rollbackMigration,
   sanitizeConversionReport,
   sanitizeMigrationReportForRollback
@@ -77,6 +78,11 @@ function createApi() {
       requireGM();
       const report = sanitizeMigrationReportForRollback(rawReport, game.world?.id ?? null);
       return rollbackMigration(report, options, hooks);
+    },
+    async restoreCoreDataReferences(rawReport, options = {}, hooks = {}) {
+      requireGM();
+      const report = sanitizeMigrationReportForRollback(rawReport, game.world?.id ?? null);
+      return rollbackCorePublicPlaceholders(report, options, hooks);
     }
   });
 }

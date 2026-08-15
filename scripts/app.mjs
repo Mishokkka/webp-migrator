@@ -2,8 +2,11 @@ import { DEFAULT_SCAN_OPTIONS, MODULE_ID, MODULE_TITLE } from "./constants.mjs";
 import {
   applyMigration,
   createAssumedConversionReport,
+  countCorePublicPlaceholderReferences,
   mergeMigrationReports,
+  rollbackCorePublicPlaceholders,
   rollbackMigration,
+  withoutCorePublicPlaceholderReferences,
   sanitizeConversionReport,
   sanitizeMigrationReportForRollback
 } from "./migration.mjs";
@@ -290,6 +293,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       applyReport: WebpMigratorApp._onApplyReportAction,
       exportMigrationReport: WebpMigratorApp._onExportMigrationReportAction,
       rollback: WebpMigratorApp._onRollbackAction,
+      rollbackCorePublic: WebpMigratorApp._onRollbackCorePublicAction,
       cancel: WebpMigratorApp._onCancelAction,
       reset: WebpMigratorApp._onResetAction
     }
@@ -365,6 +369,8 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       canRepairImageHover: !state.busy,
       canExportMigrationReport: !state.busy && !!state.migrationReport,
       canRollback: !state.busy && !!state.rollbackReport?.changedRefs?.length,
+      canRollbackCorePublic: !state.busy && countCorePublicPlaceholderReferences(state.rollbackReport) > 0,
+      corePublicRollbackCount: countCorePublicPlaceholderReferences(state.rollbackReport),
       canCancel: state.busy && !!this._activeController,
       manifestSummary: state.manifest?.summary ?? null,
       conversionSummary: state.conversionReport?.summary ?? null,
@@ -792,6 +798,39 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
     const filename = `${safeFilenamePart(game.world?.id, "world")}-webp-migration-report.json`;
     saveJsonFile(report, filename);
     this._setStatus(tr("FWM.Status.MigrationExported", `Migration report сохранен как ${filename}.`, { filename }), { force: true });
+  }
+
+  static _onRollbackCorePublicAction(event) {
+    event.preventDefault();
+    return this._runAction(tr("FWM.Status.RestoringCoreData", "Восстанавливаю ссылки Foundry Core Data..."), async (options, signal) => {
+      const report = this._viewState.rollbackReport;
+      const count = countCorePublicPlaceholderReferences(report);
+      if (!count) throw new Error(tr("FWM.Errors.NoCoreDataRollback", "В импортированном migration report нет замененных ссылок Foundry Core Data."));
+      const confirmed = await confirmAction({
+        title: tr("FWM.Confirm.CoreDataRollbackTitle", "Восстановить Core Data ссылки"),
+        content: `<p>${tr("FWM.Confirm.CoreDataRollbackBody", `Будут восстановлены только ${count} ссылок, где placeholder-repair заменил исходный путь Foundry Core Data. Остальные изменения migration report не затрагиваются.`, { count })}</p>`,
+        yes: tr("FWM.Actions.RestoreCoreData", "Восстановить Core Data")
+      });
+      if (!confirmed) {
+        this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
+        return;
+      }
+      const summary = await rollbackCorePublicPlaceholders(report, options, {
+        onProgress: ({ current, total, label }) => {
+          this._setStatus(tr("FWM.Status.RestoringCoreDataDocument", `Восстанавливаю ${current}/${total}: ${label}`, { current, total, label }));
+        },
+        signal
+      });
+      this._viewState.rollbackSummary = summary;
+      const complete = summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
+      if (complete) {
+        const remaining = withoutCorePublicPlaceholderReferences(report);
+        this._viewState.rollbackReport = remaining.changedRefs.length ? remaining : null;
+      }
+      this._setStatus(tr("FWM.Status.CoreDataRestored", `Core Data: восстановлено ${summary.changed}, уже было исправлено ${summary.already}, stale ${summary.stale}, ошибок ${summary.errors}.`, {
+        changed: summary.changed, already: summary.already, stale: summary.stale, errors: summary.errors
+      }), { force: true });
+    });
   }
 
   static _onRollbackAction(event) {

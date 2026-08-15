@@ -209,3 +209,23 @@ test("case-folded aliases survive manifest sanitization on case-insensitive plat
   assert.equal(clean.entries[0].refs.length, 2);
   assert.deepEqual(clean.entries[0].refs.map((ref) => ref.oldPath), ["Art/A.png", "art/a.png"]);
 });
+
+test("new scans and imported manifests exclude Foundry Core Data paths", async () => {
+  installGame({ actor: actorDocument("icons/core/default.png") });
+  const scanned = await scanFoundry({ worldActors: true });
+  assert.equal(scanned.summary.uniquePngPaths, 0);
+
+  const ref = {
+    uuid: "Actor.A", rootField: "img", fieldPath: ["img"], mode: "exact", sourceFormat: "png",
+    oldValue: "icons/core/default.png", newValue: "icons/core/default.webp",
+    oldPath: "icons/core/default.png", newPath: "icons/core/default.webp"
+  };
+  const raw = {
+    type: "fbl-webp-migrator-manifest", schemaVersion: 4, manifestId: "m-core", worldId: "world-a",
+    capabilities: { pngReferenceScan: true, webpReferenceScan: true, consistencyAudit: true },
+    entries: [{ oldPath: ref.oldPath, newPath: ref.newPath, refs: [ref] }], webpEntries: []
+  };
+  const clean = sanitizeManifest(raw, "world-a");
+  assert.equal(clean.entries.length, 0);
+  assert.ok(clean.ignored.some((item) => /Core Data/i.test(item.reason)));
+});

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.7
+
+- Foundry Core Data paths больше не считаются файлами из UserData/Data и не попадают в conversion/consistency/placeholder repair.
+- Учитываются официальные public-директории Foundry v13: `cards`, `css`, `fonts`, `icons`, `lang`, `scripts`, `sounds`, `ui`.
+- Старые manifest с Core Data ссылками безопасно фильтруются при импорте; CLI также игнорирует такие записи.
+- Добавлено точечное восстановление уже замененных Core Data ссылок из migration report без отката остальных изменений.
+
+
+## 0.4.6
+
+- Image Hover recovery больше не сканирует system/module compendiums, если для них не выдано отдельное разрешение записи. Это убирает ожидаемые `skipped`, которые раньше ошибочно попадали в счетчик ошибок.
+- Исправлена устаревшая инструкция README: world Actor/Scene compendiums проверяются recovery автоматически; package compendiums требуют одновременно opt-in сканирования и разрешения записи.
+
 ## 0.4.5
 
 - Исправлено неполное восстановление Image Hover: recovery больше не зависит от обычных галочек Actors/Scenes/World Compendiums.

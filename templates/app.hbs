@@ -79,6 +79,7 @@
       <button type="button" data-action="applyReport" {{#unless canApplyReport}}disabled{{/unless}}><i class="fas fa-check"></i> {{localize "FWM.Actions.ApplyPaths"}}</button>
       <button type="button" data-action="exportMigrationReport" {{#unless canExportMigrationReport}}disabled{{/unless}}><i class="fas fa-file-export"></i> {{localize "FWM.Actions.ExportMigration"}}</button>
       <button type="button" data-action="rollback" {{#unless canRollback}}disabled{{/unless}}><i class="fas fa-rotate-left"></i> {{localize "FWM.Actions.Rollback"}}</button>
+      <button type="button" data-action="rollbackCorePublic" {{#unless canRollbackCorePublic}}disabled{{/unless}}><i class="fas fa-server"></i> {{localize "FWM.Actions.RestoreCoreData"}} ({{corePublicRollbackCount}})</button>
     </div>
   </section>
 

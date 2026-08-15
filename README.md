@@ -1,4 +1,4 @@
-# FBL WebP Migrator 0.4.5
+# FBL WebP Migrator 0.4.7
 
 Целевая среда: Foundry VTT 13.351. Модуль не зависит от игровой системы.
 
@@ -345,5 +345,11 @@ Image Hover использует `flags.image-hover.specificArt = "path/image.pn
 
 Кнопка **«Исправить Image Hover»** в 0.4.5 выполняет полный recovery-проход по всем world Actors, world Scenes (Token и ActorDelta) и world Actor/Scene compendiums независимо от обычных галочек сканирования. FBL WebP Migrator 0.4.5 игнорирует этот sentinel при сканировании.
 
-Для отсутствующего реального `Specific image on hover` placeholder-repair теперь возвращает поле к `path/image.png`, а не к `icons/svg/mystery-man.svg`. Отдельная кнопка **«Исправить Image Hover»** исправляет ошибочные `mystery-man.svg` overrides, созданные placeholder-repair в 0.4.2/0.4.3. Она затрагивает только поля `flags.image-hover.specificArt`, которые сейчас точно равны `icons/svg/mystery-man.svg`. Для world compendiums включи соответствующую область сканирования перед запуском.
+Для отсутствующего реального `Specific image on hover` placeholder-repair теперь возвращает поле к `path/image.png`, а не к `icons/svg/mystery-man.svg`. Отдельная кнопка **«Исправить Image Hover»** исправляет ошибочные `mystery-man.svg` overrides, созданные placeholder-repair в 0.4.2/0.4.3. Она затрагивает только поля `flags.image-hover.specificArt`, которые сейчас точно равны `icons/svg/mystery-man.svg`. World Actor/Scene compendiums проверяются автоматически. System/module compendiums проверяются только когда одновременно включены их сканирование и опасное разрешение записи в package packs.
 
+
+## Foundry Core Data
+
+Пути из встроенного публичного хранилища Foundry не находятся в `UserData/Data` и не должны участвовать в PNG/WEBP migration. В v13 к Core Data относятся верхнеуровневые каталоги `cards/`, `css/`, `fonts/`, `icons/`, `lang/`, `scripts/`, `sounds/` и `ui/`. Модуль 0.4.7 исключает такие ссылки при новом сканировании, при импорте старого manifest и дополнительно во внешнем CLI.
+
+Если версия 0.4.2–0.4.6 уже заменила реальный Core Data путь на placeholder, импортируйте migration report того прогона. Кнопка **«Восстановить Core Data»** откатывает только placeholder-изменения, чей исходный путь относился к Core Data; остальные изменения отчета не трогаются. Без migration report или резервной копии исходный путь после замены на placeholder достоверно восстановить нельзя.

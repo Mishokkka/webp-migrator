@@ -7,6 +7,7 @@ import {
   findRichPngReferences,
   findRichWebpReferences,
   getAtPath,
+  isFoundryCorePublicAssetReference,
   normalizePhysicalPath,
   normalizeWebpPhysicalPath,
   replaceTextReference,
@@ -34,6 +35,31 @@ test("normalizes local paths, collapses dot segments, and preserves suffixes", (
   assert.equal(normalizePhysicalPath("../outside.png"), null);
   assert.equal(normalizePhysicalPath("\\\\server\\share\\a.png"), null);
   assert.equal(normalizePhysicalPath("C:relative.png"), null);
+});
+
+
+test("Foundry Core Data public paths are excluded from asset migration", () => {
+  assert.equal(isFoundryCorePublicAssetReference("icons/svg/mystery-man.svg"), true);
+  assert.equal(isFoundryCorePublicAssetReference("/ui/denim075.png?v=1"), true);
+  assert.equal(isFoundryCorePublicAssetReference("cards/default.png"), true);
+  assert.equal(isFoundryCorePublicAssetReference("worlds/world-a/icons/custom.png"), false);
+  assert.equal(isFoundryCorePublicAssetReference("3_F00L/icons/custom.png"), false);
+
+  const pngRefs = collectPngReferences({
+    img: "icons/core/default.png",
+    background: "ui/background.png",
+    custom: "3_F00L/art/hero.png",
+    html: '<img src="icons/core/rich.png"><img src="worlds/world-a/art/rich.png">'
+  }, { documentInfo: { uuid: "Actor.A", documentName: "Actor" } });
+  assert.deepEqual(pngRefs.map((ref) => ref.oldPath).sort(), ["3_F00L/art/hero.png", "worlds/world-a/art/rich.png"]);
+
+  const webpRefs = collectWebpReferences({
+    img: "icons/core/default.webp",
+    background: "ui/background.webp",
+    custom: "3_F00L/art/hero.webp",
+    html: '<img src="icons/core/rich.webp"><img src="worlds/world-a/art/rich.webp">'
+  }, { documentInfo: { uuid: "Actor.A", documentName: "Actor" } });
+  assert.deepEqual(webpRefs.map((ref) => ref.newPath).sort(), ["3_F00L/art/hero.webp", "worlds/world-a/art/rich.webp"]);
 });
 
 test("trailing whitespace produces a real WebP replacement instead of a no-op", () => {
