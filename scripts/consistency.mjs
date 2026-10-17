@@ -3,9 +3,11 @@ import {
   deepClone,
   globToRegExp,
   normalizePhysicalPath,
+  normalizePngFilePath,
+  normalizeWebpFilePath,
+  toWebpFilePath,
   normalizeWebpPhysicalPath,
-  sanitizeJsonValue,
-  toWebpPhysicalPath
+  sanitizeJsonValue
 } from "./path-utils.mjs";
 import { processDocumentTasks, validateReference } from "./migration.mjs";
 import { getPackPackageType, iterateDocumentTree } from "./scanner.mjs";
@@ -18,11 +20,7 @@ import {
 const DATA_ROOT_ID_RE = /^sha256:[a-f0-9]{64}$/i;
 const SHA256_RE = /^[a-f0-9]{64}$/i;
 
-function isCaseInsensitivePlatform(platform = globalThis.process?.platform ?? globalThis.navigator?.platform ?? "") {
-  return /^(?:win32|darwin)$/i.test(platform) || /(?:win|mac)/i.test(platform);
-}
-
-function pathKey(value, caseInsensitive = isCaseInsensitivePlatform()) {
+function pathKey(value, caseInsensitive = false) {
   const text = String(value ?? "");
   return caseInsensitive ? text.toLocaleLowerCase("en-US") : text;
 }
@@ -33,9 +31,8 @@ function validNumber(value, { integer = false, minimum = 0 } = {}) {
   return value;
 }
 
-function manifestPairMap(manifest) {
+function manifestPairMap(manifest, caseInsensitive = false) {
   const map = new Map();
-  const caseInsensitive = isCaseInsensitivePlatform();
   const add = (entry, format) => {
     if (!entry?.oldPath || !entry?.newPath) return;
     const key = pathKey(entry.oldPath, caseInsensitive);
@@ -50,7 +47,8 @@ function manifestPairMap(manifest) {
     }
     const pair = map.get(key);
     if (pathKey(pair.newPath, caseInsensitive) !== pathKey(entry.newPath, caseInsensitive)) return;
-    pair[format === "webp" ? "webpEntry" : "pngEntry"] = entry;
+    const field = format === "webp" ? "webpEntry" : "pngEntry";
+    pair[field] = pair[field] ? { ...pair[field], refs: [...pair[field].refs, ...entry.refs] } : entry;
   };
   for (const entry of manifest?.entries ?? []) add(entry, "png");
   for (const entry of manifest?.webpEntries ?? []) add(entry, "webp");
@@ -58,20 +56,24 @@ function manifestPairMap(manifest) {
 }
 
 function sanitizeFileState(input, format) {
-  const exists = input?.exists === true;
+  const exists = typeof input?.exists === "boolean" ? input.exists : null;
   const width = validNumber(input?.width, { integer: true, minimum: 1 });
   const height = validNumber(input?.height, { integer: true, minimum: 1 });
   const size = validNumber(input?.size);
   const mtimeMs = validNumber(input?.mtimeMs);
   const sha256 = SHA256_RE.test(String(input?.sha256 ?? "")) ? String(input.sha256).toLowerCase() : null;
-  const reportedValid = exists && input?.valid === true;
-  const evidenceComplete = !!(width && height && size != null && mtimeMs != null && sha256);
-  const valid = reportedValid && evidenceComplete;
+  const reportedValid = exists === true && input?.valid === true;
+  const evidenceComplete = !!(width && height && size > 0 && mtimeMs != null && sha256 && input?.decoded === true);
+  const valid = reportedValid && evidenceComplete && input?.checked === true;
   const reportedError = typeof input?.error === "string" ? input.error : undefined;
   return {
     exists,
     valid,
-    animated: format === "png" && valid && input?.animated === true,
+    animated: format === "png" && input?.animated === true,
+    decoded: input?.decoded === true,
+    checked: input?.checked === true,
+    known: exists === false || (exists === true && input?.checked === true
+      && typeof input?.valid === "boolean" && (!input.valid || evidenceComplete)),
     width,
     height,
     size,
@@ -90,7 +92,8 @@ function dimensionsMatch(file) {
 export function classifyConsistencyFile(file) {
   const png = file.png;
   const webp = file.webp;
-  if (!png.exists && !webp.exists) return "both-missing";
+  if (png.exists == null || webp.exists == null) return "unresolved";
+  if (png.exists === false && webp.exists === false) return "both-missing";
   if (png.exists && !png.valid && webp.exists && !webp.valid) return "both-invalid";
   if (png.exists && !png.valid) return webp.valid ? "invalid-png-valid-webp" : "invalid-png";
   if (webp.exists && !webp.valid) return png.valid ? "valid-png-invalid-webp" : "invalid-webp";
@@ -104,27 +107,25 @@ export function classifyConsistencyFile(file) {
 }
 
 export function isForwardRepairSafe(file) {
-  if (!file?.webp?.valid) return false;
+  if (!file?.webp?.valid || file?.png?.known !== true) return false;
   if (file?.png?.animated) return false;
   if (!file?.png?.valid) return true;
-  return dimensionsMatch(file) === true;
+  return dimensionsMatch(file) === true && file.webp.mtimeMs + 1 >= file.png.mtimeMs;
 }
 
 export function isReverseRepairSafe(file) {
-  return file?.png?.valid === true && file?.webp?.valid !== true;
+  return file?.png?.valid === true && file?.webp?.known === true && file?.webp?.valid !== true;
 }
 
 export function isPlaceholderRepairSafe(file) {
-  return file?.category === "both-missing"
-    || (file?.png?.exists === false && file?.webp?.exists === false);
+  return file?.png?.exists === false && file?.webp?.exists === false;
 }
 
-function sanitizeConcreteFile(input, pair) {
-  const oldPath = normalizePhysicalPath(input?.oldPath);
-  const newPath = normalizeWebpPhysicalPath(input?.newPath);
-  const caseInsensitive = isCaseInsensitivePlatform();
+function sanitizeConcreteFile(input, pair, caseInsensitive = false) {
+  const oldPath = normalizePngFilePath(input?.oldPath);
+  const newPath = normalizeWebpFilePath(input?.newPath);
   if (!oldPath || !newPath || /[*?]/.test(oldPath) || /[*?]/.test(newPath)) return null;
-  if (pathKey(toWebpPhysicalPath(oldPath), caseInsensitive) !== pathKey(newPath, caseInsensitive)) return null;
+  if (pathKey(toWebpFilePath(oldPath), caseInsensitive) !== pathKey(newPath, caseInsensitive)) return null;
 
   if (pair.wildcard) {
     try {
@@ -176,20 +177,20 @@ export function sanitizeConsistencyReport(raw, manifest, currentWorldId = game.w
     throw new Error("Manifest не содержит полного сканирования WEBP-ссылок. Выполни новое сканирование модулем 0.4.0 или новее.");
   }
   if (!raw || raw.type !== "fbl-webp-migrator-consistency-report") throw new Error("Это не consistency report FBL WebP Migrator.");
-  if (!(Number(raw.schemaVersion) >= 4)) throw new Error("Consistency report устарел. Выполни новый audit инструментом 0.4.0 или новее.");
+  if (!(Number(raw.schemaVersion) >= 5)) throw new Error("Consistency report устарел. Выполни новый audit инструментом 0.4.8 или новее.");
   if (raw.sourceManifestId !== manifest.manifestId) throw new Error("Consistency report создан для другого manifest.");
   if (manifest.worldId !== currentWorldId || raw.sourceWorldId !== currentWorldId) throw new Error("Manifest или consistency report относятся к другому миру.");
   const dataRootId = DATA_ROOT_ID_RE.test(String(raw.dataRootId ?? "")) ? String(raw.dataRootId).toLowerCase() : null;
   if (!dataRootId) throw new Error("Consistency report не содержит корректной привязки к Foundry Data root.");
 
-  const pairs = manifestPairMap(manifest);
+  const caseInsensitive = raw.caseInsensitivePaths === true;
+  const pairs = manifestPairMap(manifest, caseInsensitive);
   const entries = [];
   const ignored = [];
   const seen = new Set();
 
-  const caseInsensitive = isCaseInsensitivePlatform();
   for (const input of raw.entries ?? []) {
-    const oldPath = normalizePhysicalPath(input?.oldPath);
+    const oldPath = normalizePngFilePath(input?.oldPath);
     const pair = pairs.get(pathKey(oldPath, caseInsensitive));
     if (!pair || pathKey(pair.newPath, caseInsensitive) !== pathKey(input?.newPath, caseInsensitive)) {
       ignored.push({ oldPath: input?.oldPath ?? null, reason: "Пара отсутствует в текущем manifest." });
@@ -202,7 +203,12 @@ export function sanitizeConsistencyReport(raw, manifest, currentWorldId = game.w
     }
     seen.add(seenKey);
 
-    const files = (input.files ?? []).map((file) => sanitizeConcreteFile(file, pair)).filter(Boolean);
+    const inputFiles = Array.isArray(input.files) ? input.files : [];
+    const files = inputFiles.map((file) => sanitizeConcreteFile(file, pair, caseInsensitive)).filter(Boolean);
+    if (files.length !== inputFiles.length) {
+      ignored.push({ oldPath, reason: "Concrete file evidence contains invalid or mismatched paths." });
+      continue;
+    }
     const pngRefCount = pair.pngEntry?.refs?.length ?? 0;
     const webpRefCount = pair.webpEntry?.refs?.length ?? 0;
     const forwardAuthorized = pngRefCount > 0 && files.length > 0 && files.every(isForwardRepairSafe);
@@ -244,6 +250,7 @@ export function sanitizeConsistencyReport(raw, manifest, currentWorldId = game.w
     sourceManifestId: manifest.manifestId,
     sourceWorldId: currentWorldId,
     dataRootId,
+    caseInsensitivePaths: caseInsensitive,
     ignored,
     summary: summarize(entries, ignored.length),
     entries
@@ -284,13 +291,16 @@ export async function applyConsistencyRepairs(manifest, consistencyReport, optio
   if (manifest?.worldId !== currentWorldId || consistencyReport?.sourceWorldId !== currentWorldId) throw new Error("Manifest или consistency report относятся к другому миру.");
   if (consistencyReport?.sourceManifestId !== manifest?.manifestId) throw new Error("Consistency report создан для другого manifest.");
 
-  const reportMap = new Map((consistencyReport.entries ?? []).map((entry) => [entry.oldPath, entry]));
-  const forwardEntries = (manifest.entries ?? []).filter((entry) => reportMap.get(entry.oldPath)?.forwardAuthorized === true);
-  const reverseEntries = (manifest.webpEntries ?? []).filter((entry) => reportMap.get(entry.oldPath)?.reverseAuthorized === true);
+  const caseInsensitive = consistencyReport.caseInsensitivePaths === true;
+  const reportMap = new Map((consistencyReport.entries ?? []).map((entry) => [pathKey(entry.oldPath, caseInsensitive), entry]));
+  const forwardEntries = (manifest.entries ?? []).filter((entry) => reportMap.get(pathKey(entry.oldPath, caseInsensitive))?.forwardAuthorized === true);
+  const reverseEntries = (manifest.webpEntries ?? []).filter((entry) => reportMap.get(pathKey(entry.oldPath, caseInsensitive))?.reverseAuthorized === true);
   if (!forwardEntries.length && !reverseEntries.length) throw new Error("В отчете нет безопасных автоматических исправлений.");
 
   const writeOptions = normalizedWriteOptions(options);
   const results = [];
+  const textChanges = [];
+  const unverifiedWrites = [];
   const phases = [
     { entries: forwardEntries, reverse: false, direction: "forward" },
     { entries: reverseEntries, reverse: true, direction: "reverse" }
@@ -306,6 +316,8 @@ export async function applyConsistencyRepairs(manifest, consistencyReport, optio
         onProgress?.({ current: completed, total: Math.max(total, completed), label, direction: phase.direction });
       }
     });
+    textChanges.push(...phaseResult.textChanges);
+    unverifiedWrites.push(...phaseResult.unverifiedWrites);
     for (const result of phaseResult.results) results.push({ ...result, direction: phase.direction });
   }
 
@@ -365,18 +377,21 @@ export async function applyConsistencyRepairs(manifest, consistencyReport, optio
     cleanupFiles: [],
     skipped,
     changedRefs,
+    textChanges,
+    unverifiedWrites,
+    cancelled: signal?.aborted === true,
+    caseInsensitivePaths: consistencyReport.caseInsensitivePaths === true,
     issues,
     consistencySummary: sanitizeJsonValue(consistencyReport.summary)
   };
 }
 
-function placeholderRefsForEntry(manifest, reportEntry) {
+function placeholderRefsForEntry(manifest, reportEntry, caseInsensitive = false) {
   const refs = [];
-  const caseInsensitive = isCaseInsensitivePlatform();
   const reportKey = pathKey(reportEntry.oldPath, caseInsensitive);
-  const findEntry = (entries) => (entries ?? []).find((entry) =>
+  const findEntry = (entries) => ({ refs: (entries ?? []).filter((entry) =>
     pathKey(entry?.oldPath, caseInsensitive) === reportKey
-  );
+  ).flatMap((entry) => entry.refs ?? []) });
   const pngEntry = findEntry(manifest.entries);
   const webpEntry = findEntry(manifest.webpEntries);
   for (const ref of pngEntry?.refs ?? []) {
@@ -406,12 +421,12 @@ export async function applyMissingPlaceholderRepairs(manifest, consistencyReport
 
   const reportEntries = (consistencyReport.entries ?? []).filter((entry) => entry.placeholderAuthorized === true && !entry.wildcard);
   const entries = reportEntries
-    .map((entry) => ({ oldPath: entry.oldPath, newPath: entry.newPath, wildcard: false, refs: placeholderRefsForEntry(manifest, entry) }))
+    .map((entry) => ({ oldPath: entry.oldPath, newPath: entry.newPath, wildcard: false, refs: placeholderRefsForEntry(manifest, entry, consistencyReport.caseInsensitivePaths === true) }))
     .filter((entry) => entry.refs.length > 0);
   if (!entries.length) throw new Error("В отчете нет подтвержденных отсутствующих файлов для замены на заглушку.");
 
   const writeOptions = normalizedWriteOptions(options);
-  const { results } = await processDocumentTasks(entries, writeOptions, false, { onProgress, signal });
+  const { results, textChanges, unverifiedWrites } = await processDocumentTasks(entries, writeOptions, false, { onProgress, signal });
   const repaired = [];
   const skipped = [];
   for (const entry of entries) {
@@ -462,6 +477,10 @@ export async function applyMissingPlaceholderRepairs(manifest, consistencyReport
     cleanupFiles: [],
     skipped,
     changedRefs,
+    textChanges,
+    unverifiedWrites,
+    cancelled: signal?.aborted === true,
+    caseInsensitivePaths: consistencyReport.caseInsensitivePaths === true,
     issues,
     consistencySummary: sanitizeJsonValue(consistencyReport.summary)
   };

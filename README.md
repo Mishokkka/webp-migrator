@@ -1,4 +1,4 @@
-# FBL WebP Migrator 0.4.7
+# FBL WebP Migrator 0.4.8
 
 Целевая среда: Foundry VTT 13.351. Модуль не зависит от игровой системы.
 
@@ -13,7 +13,7 @@
 
 - Foundry VTT 13.351;
 - Node.js 20 или новее для `tools/convert-cwebp.js` и тестов;
-- официальный `cwebp` из libwebp для новой конвертации;
+- официальные `cwebp` и `dwebp` из libwebp для conversion, audit и cleanup, включая dry-run; restore проверяет хеши и не требует декодеров;
 - резервная копия Foundry `Data` и мира перед изменениями.
 
 Официальные сборки libwebp:
@@ -27,6 +27,10 @@ https://developers.google.com/speed/webp/docs/precompiled
 ```text
 D:\libwebp\bin\cwebp.exe
 ```
+
+`dwebp` автоматически ищется рядом с явно указанным `cwebp`; если `cwebp` берётся из `PATH`, там же должен быть доступен `dwebp`. Можно задать отдельный `--dwebp "D:\libwebp\bin\dwebp.exe"`. Для audit и cleanup указывайте тот же `--cwebp`, что для conversion. Отсутствие декодера останавливает проверку и не считается отсутствием изображения.
+
+При обновлении до **0.4.8** выполните новое сканирование и заново создайте conversion/consistency reports. Новые отчёты имеют `schemaVersion: 5`: старые проверки заголовков изображений не дают разрешения на изменение ссылок или cleanup. Прежние migration reports остаются пригодными для отката точных ссылок; текстовые ссылки без сохранённого исходного текста автоматически не откатываются.
 
 ## Установка
 
@@ -86,7 +90,7 @@ node tools\convert-cwebp.js ^
 - проверяет принадлежность указанному миру и каталогу `Data`;
 - защищается от выхода через symlink или junction;
 - находит обе стороны каждой пары `.png` / `.webp`;
-- структурно проверяет PNG, APNG и WEBP;
+- проверяет структуру, CRC и распаковку PNG, определяет APNG и полностью декодирует статический WEBP;
 - читает размеры изображений;
 - записывает SHA-256, размер и время изменения каждого найденного файла;
 - отдельно оценивает каждый конкретный файл wildcard-пути.
@@ -226,7 +230,7 @@ System/module compendiums изменяются только при явном в
 <world-id>-webp-migration-report.json
 ```
 
-Отчет содержит историю отката и конкретный список `cleanupFiles`. Cleanup разрешается только для файлов, подтвержденных conversion report и успешным применением всех ссылок соответствующего manifest-пути.
+Отчет содержит историю отката и конкретный список `cleanupFiles`. Cleanup разрешается только для файлов, подтвержденных conversion report и успешным применением всех пересекающихся ссылок manifest, включая сочетание wildcard и точных путей. Пропуск источников при сканировании блокирует cleanup.
 
 # Cleanup и карантин
 
@@ -266,13 +270,15 @@ node tools\convert-cwebp.js ^
   --world-id "air-islands"
 ```
 
-Существующий файл не перезаписывается. Хеш карантинного PNG должен совпасть с отчетом.
+Существующий файл не перезаписывается. Хеш карантинного PNG должен совпасть с отчетом. `--restore ... --dry-run` только проверяет возможность восстановления и возвращает `would-restore`.
 
 Безвозвратное удаление требует двух флагов:
 
 ```text
 --delete --permanent-delete
 ```
+
+`--dry-run` имеет приоритет во всех режимах: даже `--cleanup ... --delete --permanent-delete --dry-run` не перемещает и не удаляет изображения. JSON-отчёт предварительной проверки при этом сохраняется. Флаги, не относящиеся к выбранному режиму, отклоняются.
 
 Значения вида `--delete false` отклоняются как ошибка синтаксиса.
 
@@ -295,7 +301,11 @@ const placeholders = await game.fblWebpMigrator.repairMissingAssets(manifest, co
 const rollback = await game.fblWebpMigrator.rollbackReport(migrationReport, options, hooks);
 ```
 
-`hooks` может содержать `{ signal, onProgress }`.
+`hooks` может содержать `{ signal, onProgress }`. Отмена migration/consistency/placeholder repair возвращает частичный отчёт с `cancelled: true`, сохранёнными `changedRefs` и `textChanges`; уже выполненные записи остаются доступными для отката. Незавершённые задачи записываются как skipped. Ошибка проверки после записи сохраняет `unverifiedWrites` для диагностики, но не разрешает cleanup.
+
+Для текстовых полей `textChanges` хранит исходный и итоговый текст и проверяемую последовательность замен. Откат применяется только к ожидаемому состоянию поля; чужие правки после миграции приводят к stale. Повторный частичный откат безопасен. Любое начало отката, включая частичный или отменённый, отзывает cleanup-разрешение текущего отчёта. Новый успешно проверенный запуск может выдать новый список cleanup.
+
+Отчёт в памяти нужно экспортировать: отмена через кнопку сохраняет его, но закрытие вкладки или аварийное завершение процесса не являются транзакционным откатом. Ранее экспортированные JSON-файлы не могут автоматически узнать о последующем откате или изменениях мира; не используйте их для cleanup после таких изменений. Перед cleanup нужен актуальный отчёт для всех используемых областей мира.
 
 # Что покрывается
 
@@ -327,7 +337,10 @@ const rollback = await game.fblWebpMigrator.rollbackReport(migrationReport, opti
 - APNG намеренно не конвертируется и не заменяется на существующий WEBP автоматически;
 - Chat Messages ограничены уже загруженной историей;
 - module/system updates могут затереть изменения package compendiums;
-- аудит доказывает состояние только путей и областей, включенных в конкретный manifest.
+- аудит доказывает состояние только путей и областей, включенных в конкретный manifest;
+- одинаковые размеры и свежий mtime существующего WEBP не доказывают визуальную идентичность PNG: неоднозначные пары требуют ручной проверки или `--overwrite`;
+- проверка PNG ограничена 512 MiB распакованных строк изображения и 512 MiB на chunk; превышение даёт ошибку без изменения исходника;
+- регистр путей определяется CLI на сервере (`caseInsensitivePaths`), а не операционной системой браузера; Windows использует нечувствительное сравнение, остальные платформы — чувствительное. Нестандартные файловые системы требуют совпадения фактического написания путей.
 
 # Тесты
 
@@ -335,7 +348,18 @@ const rollback = await game.fblWebpMigrator.rollbackReport(migrationReport, opti
 npm run check
 ```
 
-Набор включает тесты PNG/WEBP scanner, manifest/report sanitization, двусторонний consistency repair, stale guard, leaf updates, двусторонний rollback, объединение отчетов, compendium lock recovery, CLI parsing, APNG, структурную валидацию изображений, wildcard, symlink escape, atomic overwrite, hash-bound cleanup, quarantine и restore.
+Перед тестами установите libwebp и добавьте `cwebp`/`dwebp` в `PATH`, либо задайте переменные `FWM_CWEBP` и `FWM_DWEBP`. Тесты используют настоящие декодируемые изображения; полная CLI-конвертация работает в тестах и на Windows. GitHub Actions проверяет Node.js 20 и 24 на Linux.
+
+Для дополнительной проверки настоящей модели Foundry без открытия мира:
+
+```powershell
+$env:FWM_FOUNDRY_APP = 'D:\Foundry\resources\app'
+npm run test:foundry
+```
+
+Проверяются реальные `DataModel.updateSource`, `ObjectField`, `ArrayField` и `SchemaField` установленного Foundry v13. Исходники Foundry не включены в репозиторий.
+
+Набор включает тесты PNG/WEBP scanner, manifest/report sanitization, двусторонний consistency repair, stale guard, сохранение массивов, отмену с частичным отчётом, точный откат HTML, двусторонний rollback, объединение отчетов, compendium lock recovery, CLI parsing, APNG, проверку декодирования и повреждённых payload, wildcard, symlink escape, atomic overwrite, hash-bound cleanup, quarantine и restore.
 
 Исторический сводный разбор исправлений 0.3.0 находится в `REVIEW_RESOLUTION_0.3.0.md`.
 

@@ -68,7 +68,7 @@ function manifest() {
   const reverse = ref("art/reverse.png", "art/reverse.webp", ["system", "back"], "webp");
   return {
     type: "fbl-webp-migrator-manifest",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.0",
     manifestId: "manifest-a",
     worldId: "world-a",
@@ -83,6 +83,8 @@ function rawReport() {
   const valid = (width, height) => ({
     exists: true,
     valid: true,
+    checked: true,
+    decoded: true,
     animated: false,
     width,
     height,
@@ -93,9 +95,10 @@ function rawReport() {
   const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
   return {
     type: "fbl-webp-migrator-consistency-report",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.0",
     producer: "test",
+    caseInsensitivePaths: true,
     sourceManifestId: "manifest-a",
     sourceWorldId: "world-a",
     dataRootId: `sha256:${"c".repeat(64)}`,
@@ -205,7 +208,7 @@ test("both-missing references can be replaced with the Foundry placeholder and r
   const webpRef = ref("art/missing.png", "art/missing.webp", ["system", "back"], "webp");
   const sourceManifest = {
     type: "fbl-webp-migrator-manifest",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.2",
     manifestId: "manifest-a",
     worldId: "world-a",
@@ -217,9 +220,10 @@ test("both-missing references can be replaced with the Foundry placeholder and r
   const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
   const raw = {
     type: "fbl-webp-migrator-consistency-report",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.2",
     producer: "test",
+    caseInsensitivePaths: true,
     sourceManifestId: "manifest-a",
     sourceWorldId: "world-a",
     dataRootId: `sha256:${"c".repeat(64)}`,
@@ -261,7 +265,7 @@ test("missing Image Hover specific-art overrides reset to the module sentinel in
   );
   const sourceManifest = {
     type: "fbl-webp-migrator-manifest",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.4",
     manifestId: "manifest-hover",
     worldId: "world-a",
@@ -273,9 +277,10 @@ test("missing Image Hover specific-art overrides reset to the module sentinel in
   const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
   const raw = {
     type: "fbl-webp-migrator-consistency-report",
-    schemaVersion: 4,
+    schemaVersion: 5,
     version: "0.4.4",
     producer: "test",
+    caseInsensitivePaths: true,
     sourceManifestId: "manifest-hover",
     sourceWorldId: "world-a",
     dataRootId: `sha256:${"c".repeat(64)}`,
@@ -334,7 +339,7 @@ test("placeholder repair resolves case-only PNG/WEBP aliases on case-insensitive
     webpRef.newValue = "art/missing.webp";
     const sourceManifest = {
       type: "fbl-webp-migrator-manifest",
-      schemaVersion: 4,
+      schemaVersion: 5,
       version: "0.4.3",
       manifestId: "manifest-a",
       worldId: "world-a",
@@ -345,10 +350,12 @@ test("placeholder repair resolves case-only PNG/WEBP aliases on case-insensitive
     };
     const missing = { exists: false, valid: false, animated: false, width: null, height: null, size: null, mtimeMs: null, sha256: null };
     const raw = {
+      caseInsensitivePaths: true,
       type: "fbl-webp-migrator-consistency-report",
-      schemaVersion: 4,
+      schemaVersion: 5,
       version: "0.4.3",
       producer: "test",
+    caseInsensitivePaths: true,
       sourceManifestId: "manifest-a",
       sourceWorldId: "world-a",
       dataRootId: `sha256:${"c".repeat(64)}`,

@@ -192,5 +192,6 @@
   "FWM.Status.RestoringCoreData": "Restoring Foundry Core Data references...",
   "FWM.Status.RestoringCoreDataDocument": "Restoring {current}/{total}: {label}",
   "FWM.Status.CoreDataRestored": "Core Data: restored {changed}, already correct {already}, stale {stale}, errors {errors}.",
-  "FWM.Errors.NoCoreDataRollback": "The imported migration report contains no replaced Foundry Core Data references."
+  "FWM.Errors.NoCoreDataRollback": "The imported migration report contains no replaced Foundry Core Data references.",
+  "FWM.Status.CancelledPartial": "Operation stopped. The report of completed changes is retained; export it to keep rollback history."
 }

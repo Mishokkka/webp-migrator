@@ -93,11 +93,11 @@ export function splitPathSuffix(value) {
   return { path: source.slice(0, index), suffix: source.slice(index) };
 }
 
-export function isFoundryCorePublicAssetReference(value) {
+export function isFoundryCorePublicAssetReference(value, { physical = false } = {}) {
   const text = String(value ?? "").trim();
   if (!text || isExternalReference(text)) return false;
-  const { path } = splitPathSuffix(text);
-  let normalized = decodePath(path).replace(/\\/g, "/");
+  const path = physical ? text : splitPathSuffix(text).path;
+  let normalized = (physical ? path : decodePath(path)).replace(/\\/g, "/");
   while (normalized.startsWith("./")) normalized = normalized.slice(2);
   normalized = normalized.replace(/^\/+/, "").replace(/\/{2,}/g, "/");
   const first = normalized.split("/").find(Boolean)?.toLowerCase();
@@ -134,6 +134,7 @@ export function looksLikeAssetPath(value, keyHint = "", { allowBare = false } = 
   if (!isPngReference(value)) return false;
   const trimmed = value.trim();
   if (isFoundryCorePublicAssetReference(trimmed)) return false;
+  if (!isSingleAssetValue(trimmed, keyHint, allowBare)) return false;
   if (allowBare || PATHISH_RE.test(trimmed)) return true;
   return ASSET_KEY_RE.test(keyHint);
 }
@@ -142,6 +143,7 @@ export function looksLikeWebpAssetPath(value, keyHint = "", { allowBare = false 
   if (!isWebpReference(value)) return false;
   const trimmed = value.trim();
   if (isFoundryCorePublicAssetReference(trimmed)) return false;
+  if (!isSingleAssetValue(trimmed, keyHint, allowBare)) return false;
   if (allowBare || PATHISH_RE.test(trimmed)) return true;
   return ASSET_KEY_RE.test(keyHint);
 }
@@ -154,10 +156,25 @@ export function toPngReference(value) {
   return replaceSuffixPreservingWhitespace(value, WEBP_SUFFIX_RE, ".png");
 }
 
+function isSingleAssetValue(value, keyHint, allowBare) {
+  if (/[<>\r\n]|:\s/.test(value)) return false;
+  if (allowBare) return true;
+  if (/^(?:text|content|description|biography|notes|caption)$/i.test(keyHint)) return false;
+  if (/["']/.test(value) && !ASSET_KEY_RE.test(keyHint)) return false;
+  return !/\s/.test(value) || ASSET_KEY_RE.test(keyHint);
+}
+
 export function normalizePhysicalPath(reference) {
   const { path } = splitPathSuffix(String(reference ?? "").trim());
   if (!path || isExternalReference(path) || path.includes("\0")) return null;
-  let normalized = decodePath(path).replace(/\\/g, "/");
+  return normalizePngFilePath(decodePath(path));
+}
+
+// Manifest/report paths are already decoded filesystem names. Never URL-decode
+// them again: a literal %20 in a filename must remain a literal %20.
+function normalizeFilePath(path, extension) {
+  if (typeof path !== "string" || !path || isExternalReference(path) || path.includes("\0")) return null;
+  let normalized = path.replace(/\\/g, "/");
   while (normalized.startsWith("./")) normalized = normalized.slice(2);
   normalized = normalized.replace(/^\/+/, "").replace(/\/{2,}/g, "/");
   const segments = [];
@@ -166,25 +183,27 @@ export function normalizePhysicalPath(reference) {
     if (segment === ".." || DANGEROUS_PATH_SEGMENTS.has(segment) || /^[a-z]:$/i.test(segment)) return null;
     segments.push(segment);
   }
-  if (!segments.length || !/\.png$/i.test(segments.at(-1))) return null;
+  if (!segments.length || !extension.test(segments.at(-1))) return null;
   return segments.join("/");
+}
+
+export function normalizePngFilePath(path) {
+  return normalizeFilePath(path, /\.png$/i);
+}
+
+export function normalizeWebpFilePath(path) {
+  return normalizeFilePath(path, /\.webp$/i);
+}
+
+export function toWebpFilePath(path) {
+  return normalizePngFilePath(path)?.replace(/\.png$/i, ".webp") ?? null;
 }
 
 export function normalizeWebpPhysicalPath(reference) {
   const text = String(reference ?? "").trim();
   const { path } = splitPathSuffix(text);
   if (!path || isExternalReference(path) || path.includes("\0")) return null;
-  let normalized = decodePath(path).replace(/\\/g, "/");
-  while (normalized.startsWith("./")) normalized = normalized.slice(2);
-  normalized = normalized.replace(/^\/+/, "").replace(/\/{2,}/g, "/");
-  const segments = [];
-  for (const segment of normalized.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === ".." || DANGEROUS_PATH_SEGMENTS.has(segment) || /^[a-z]:$/i.test(segment)) return null;
-    segments.push(segment);
-  }
-  if (!segments.length || !/\.webp$/i.test(segments.at(-1))) return null;
-  return segments.join("/");
+  return normalizeWebpFilePath(decodePath(path));
 }
 
 export function toWebpPhysicalPath(reference) {
@@ -245,14 +264,8 @@ function addRichCandidate(matches, seen, candidate) {
 
 export function findRichPngReferences(text) {
   if (typeof text !== "string" || !/\.png/i.test(text)) return [];
-  const matches = [];
-  const seen = new Set();
   const patterns = [HTML_ATTRIBUTE_RE, CSS_URL_RE, MARKDOWN_DEST_RE, QUOTED_PNG_RE, TOKEN_PNG_RE];
-  for (const regex of patterns) {
-    regex.lastIndex = 0;
-    for (const match of text.matchAll(regex)) addRichCandidate(matches, seen, match.slice(1).find(Boolean));
-  }
-  return matches;
+  return findRichReferences(text, patterns, addRichCandidate);
 }
 
 function addRichWebpCandidate(matches, seen, candidate) {
@@ -264,12 +277,29 @@ function addRichWebpCandidate(matches, seen, candidate) {
 
 export function findRichWebpReferences(text) {
   if (typeof text !== "string" || !/\.webp/i.test(text)) return [];
+  const patterns = [HTML_ATTRIBUTE_RE, CSS_URL_RE, MARKDOWN_DEST_RE, QUOTED_WEBP_RE, TOKEN_WEBP_RE];
+  return findRichReferences(text, patterns, addRichWebpCandidate);
+}
+
+function findRichReferences(text, patterns, addCandidate) {
   const matches = [];
   const seen = new Set();
-  const patterns = [HTML_ATTRIBUTE_RE, CSS_URL_RE, MARKDOWN_DEST_RE, QUOTED_WEBP_RE, TOKEN_WEBP_RE];
+  const spans = [];
   for (const regex of patterns) {
     regex.lastIndex = 0;
-    for (const match of text.matchAll(regex)) addRichWebpCandidate(matches, seen, match.slice(1).find(Boolean));
+    for (const match of text.matchAll(regex)) {
+      const candidate = regex === QUOTED_PNG_RE || regex === QUOTED_WEBP_RE
+        ? match[2] : match.slice(1).find(Boolean);
+      if (!candidate) continue;
+      const start = match.index + match[0].indexOf(candidate);
+      const end = start + candidate.length;
+      // A whitespace-separated filename tail inside an attribute/quoted path
+      // is not another asset. Also reserve remote and Core path spans so their
+      // tails cannot be misidentified as local files by the fallback scanner.
+      if (spans.some((span) => start >= span.start && end <= span.end)) continue;
+      spans.push({ start, end });
+      addCandidate(matches, seen, candidate);
+    }
   }
   return matches;
 }

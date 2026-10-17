@@ -8,56 +8,7 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const cli = require("../tools/convert-cwebp.js");
 
-function chunk(type, data = Buffer.alloc(0), endian = "be") {
-  const length = Buffer.alloc(4);
-  if (endian === "le") length.writeUInt32LE(data.length);
-  else length.writeUInt32BE(data.length);
-  const crc = endian === "be" ? Buffer.alloc(4) : Buffer.alloc(data.length % 2);
-  return Buffer.concat([length, Buffer.from(type, "ascii"), data, crc]);
-}
-
-function webpChunk(type, data = Buffer.alloc(0)) {
-  const length = Buffer.alloc(4);
-  length.writeUInt32LE(data.length);
-  const pad = Buffer.alloc(data.length % 2);
-  return Buffer.concat([Buffer.from(type, "ascii"), length, data, pad]);
-}
-
-function makePng(width = 2, height = 3, { animated = false, payload = 1 } = {}) {
-  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 6;
-  const chunks = [chunk("IHDR", ihdr)];
-  if (animated) {
-    const actl = Buffer.alloc(8);
-    actl.writeUInt32BE(2, 0);
-    actl.writeUInt32BE(0, 4);
-    chunks.push(chunk("acTL", actl));
-  }
-  chunks.push(chunk("IDAT", Buffer.alloc(payload, 0x01)));
-  chunks.push(chunk("IEND"));
-  return Buffer.concat([signature, ...chunks]);
-}
-
-function makeWebp(width = 2, height = 3, { junk = 0 } = {}) {
-  const widthMinusOne = width - 1;
-  const heightMinusOne = height - 1;
-  const vp8l = Buffer.alloc(5);
-  vp8l[0] = 0x2f;
-  vp8l[1] = widthMinusOne & 0xff;
-  vp8l[2] = ((widthMinusOne >> 8) & 0x3f) | ((heightMinusOne & 0x03) << 6);
-  vp8l[3] = (heightMinusOne >> 2) & 0xff;
-  vp8l[4] = (heightMinusOne >> 10) & 0x0f;
-  const chunks = [webpChunk("VP8L", vp8l)];
-  if (junk) chunks.push(webpChunk("JUNK", Buffer.alloc(junk, 0x55)));
-  const payload = Buffer.concat([Buffer.from("WEBP"), ...chunks]);
-  const riffSize = Buffer.alloc(4);
-  riffSize.writeUInt32LE(payload.length, 0);
-  return Buffer.concat([Buffer.from("RIFF"), riffSize, payload]);
-}
+import { makePng, makeWebp, webpChunk } from "./image-fixtures.mjs";
 
 function makeVp8xOnly(width = 2, height = 3) {
   const data = Buffer.alloc(10);
@@ -78,14 +29,6 @@ function write(root, relative, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, data);
   return file;
-}
-
-function makeFakeCwebp(root, webpBytes) {
-  const script = path.join(root, "fake-cwebp.js");
-  const base64 = webpBytes.toString("base64");
-  fs.writeFileSync(script, `#!/usr/bin/env node\nconst fs=require('fs');\nif(process.argv.includes('-version')){console.log('fake-cwebp 1.0');process.exit(0);}\nconst i=process.argv.indexOf('-o');\nif(i<0)process.exit(3);\nfs.writeFileSync(process.argv[i+1],Buffer.from('${base64}','base64'));\n`, "utf8");
-  fs.chmodSync(script, 0o755);
-  return script;
 }
 
 function withCleanup(fn) {
@@ -134,7 +77,7 @@ test("PNG and WebP inspection rejects truncated or container-only fakes", () => 
   const magicOnly = write(root, "magic.webp", Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]));
   const vp8xOnly = write(root, "vp8x.webp", makeVp8xOnly(7, 9));
 
-  assert.deepEqual(cli.inspectPng(png), { valid: true, width: 7, height: 9, animated: false });
+  assert.deepEqual(cli.inspectPng(png), { valid: true, decoded: true, error: undefined, width: 7, height: 9, animated: false });
   assert.equal(cli.inspectPng(apng).animated, true);
   assert.equal(cli.inspectPng(badPng).valid, false);
   assert.equal(cli.inspectWebp(webp).valid, true);
@@ -144,7 +87,7 @@ test("PNG and WebP inspection rejects truncated or container-only fakes", () => 
 
 test("PNG inspection tolerates harmless bytes after IEND", () => withCleanup((root) => {
   const png = write(root, "trailing.png", Buffer.concat([makePng(7, 9), Buffer.from("legacy-metadata")]));
-  assert.deepEqual(cli.inspectPng(png), { valid: true, width: 7, height: 9, animated: false });
+  assert.deepEqual(cli.inspectPng(png), { valid: true, decoded: true, error: undefined, width: 7, height: 9, animated: false });
 }));
 
 test("dry-run reports the concrete reason when a .png path is not PNG data", () => withCleanup((rootPath) => {
@@ -213,7 +156,7 @@ test("symlink paths escaping Data are rejected", (t) => withCleanup((rootPath) =
   assert.throws(() => cli.toAbsolute(root, "link/secret.png"), /Symlink|Real path escapes/);
 }));
 
-test("full conversion handles wildcard ? and writes a bound report", { skip: process.platform === "win32" ? "Fake cwebp launcher is POSIX-only." : false }, () => withCleanup((rootPath) => {
+test("full conversion handles wildcard ? and writes a bound report", () => withCleanup((rootPath) => {
   const data = path.join(rootPath, "Data");
   fs.mkdirSync(data);
   write(data, "tokens/icon1.png", makePng(4, 5, { payload: 200 }));
@@ -226,7 +169,7 @@ test("full conversion handles wildcard ? and writes a bound report", { skip: pro
     worldId: "world-a",
     entries: [{ oldPath: "tokens/icon?.png", newPath: "tokens/icon?.webp" }]
   }));
-  const cwebp = makeFakeCwebp(rootPath, makeWebp(4, 5));
+  const cwebp = process.env.FWM_CWEBP || "cwebp";
   const out = path.join(rootPath, "conversion.json");
   const report = cli.convert({ manifest: manifestPath, data, cwebp, out, quality: "85", "world-id": "world-a" });
   assert.equal(report.summary.converted, 1);
@@ -251,7 +194,7 @@ test("cleanup quarantines only concrete reported files and restore reverses it",
   const webpInfo = cli.inspectWebp(newA);
   const migrationPath = path.join(rootPath, "migration.json");
   fs.writeFileSync(migrationPath, JSON.stringify({
-    type: "fbl-webp-migrator-migration-report",
+    type: "fbl-webp-migrator-migration-report", schemaVersion: 5,
     sourceManifestId: "manifest-a",
     sourceDataRootId: root.id,
     worldId: "world-a",
@@ -296,7 +239,7 @@ test("cleanup refuses changed hashes and permanent deletion needs two flags", ()
   const root = cli.validateDataRoot(data);
   const migrationPath = path.join(rootPath, "migration.json");
   fs.writeFileSync(migrationPath, JSON.stringify({
-    type: "fbl-webp-migrator-migration-report",
+    type: "fbl-webp-migrator-migration-report", schemaVersion: 5,
     sourceDataRootId: root.id,
     worldId: "world-a",
     cleanupFiles: [{
