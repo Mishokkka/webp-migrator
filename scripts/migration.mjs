@@ -557,6 +557,18 @@ function verifyReference(source, ref, reverse = false) {
   return paths.includes(expectedPath) && !oppositePaths.includes(oppositePath);
 }
 
+// Rollback must match the actual saved value when Foundry cleaned an exact
+// reference. Re-check its path so imported metadata cannot redirect the write.
+function replaceRollbackReference(source, ref, reverse) {
+  const current = getAtPath(source, ref.fieldPath);
+  if (ref.mode === "text") return { status: "stale", value: current };
+  if (verifyReference(source, ref, reverse)) return { status: "already", value: current };
+  if (current === ref.savedValue && verifyReference(source, ref, !reverse)) {
+    return { status: "changed", value: referenceOperationValues(ref, reverse).target };
+  }
+  return replaceReference(current, ref, reverse);
+}
+
 async function readPendingRelocks() {
   try {
     const value = game.settings?.get?.("fbl-webp-migrator", PENDING_RELOCKS_SETTING);
@@ -816,8 +828,8 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
         const replacement = textRestore
           ? { status: current === textRestore.before || textRestore.earlierValues?.includes(current)
             ? "already" : current === textRestore.after ? "changed" : "stale", value: textRestore.before }
-          : (rollbackWithoutSnapshots && task.ref.mode === "text"
-            ? { status: "stale", value: current }
+          : (rollbackWithoutSnapshots
+            ? replaceRollbackReference(working, task.ref, reverse)
             : replaceReference(current, task.ref, reverse));
         if (replacement.status === "already") {
           results.push({ ...task.resultBase, status: "already" });
@@ -892,14 +904,32 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
         const ref = change.operations[0].ref;
         if (updatedSource && getAtPath(updatedSource, ref.fieldPath) === change.after) textChanges.push(change);
       }
-      const arraysIntact = updatedSource && [...updatePaths.values()].every((segments) =>
-        !Array.isArray(getAtPath(working, segments))
-        || JSON.stringify(getAtPath(updatedSource, segments)) === JSON.stringify(getAtPath(working, segments)));
+      const arraysIntact = updatedSource && [...updatePaths.values()].every((segments) => {
+        const staged = getAtPath(working, segments);
+        if (!Array.isArray(staged)) return true;
+        const observed = deepClone(getAtPath(updatedSource, segments));
+        if (!Array.isArray(observed)) return false;
+        for (const { ref } of pending) {
+          const leaf = ref.fieldPath;
+          if (ref.mode !== "exact" || leaf.length <= segments.length
+            || !segments.every((segment, index) => leaf[index] === segment)) continue;
+          // Only verified exact asset leaves may differ after Foundry cleaning.
+          // Text snapshots and every sibling element/field must match exactly.
+          if (verifyReference(updatedSource, ref, reverse)) {
+            setAtPath(observed, leaf.slice(segments.length), getAtPath(working, leaf));
+          }
+        }
+        return JSON.stringify(observed) === JSON.stringify(staged);
+      });
       for (const pendingResult of pending) {
         if (arraysIntact && (textRestore
           ? getAtPath(updatedSource, pendingResult.ref.fieldPath) === textRestore.before
           : verifyReference(updatedSource, pendingResult.ref, reverse))) {
           pendingResult.status = "changed";
+          if (!rollbackWithoutSnapshots && pendingResult.ref.mode === "exact") {
+            const saved = getAtPath(updatedSource, pendingResult.ref.fieldPath);
+            if (saved !== referenceOperationValues(pendingResult.ref, reverse).target) pendingResult.ref.savedValue = saved;
+          }
           if (writeError) pendingResult.warning = `Foundry сообщил ошибку после записи: ${writeError?.message ?? String(writeError)}`;
           continue;
         }

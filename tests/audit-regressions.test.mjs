@@ -92,6 +92,99 @@ test("A01: array updates and rollback preserve siblings, metadata and nested arr
   assert.deepEqual(doc.current(), before);
 });
 
+test("normalized exact array leaves retain rollback history across report export and import", async () => {
+  const before = {
+    img: "art/a.png ",
+    flags: { gallery: [{ img: "art/a.png ", caption: "keep", variants: ["art/b.png ", "other.jpg"] }, { img: "other.jpg", caption: "also keep" }] }
+  };
+  const doc = document("Normalized", before, { rewrite: (data) => {
+    data.img = data.img.trim();
+    data.flags.gallery[0].img = data.flags.gallery[0].img.trim();
+    data.flags.gallery[0].variants[0] = data.flags.gallery[0].variants[0].trim();
+  } });
+  installGame([doc]);
+  const source = manifest([doc]);
+  const report = await applyMigration(source, sanitizeConversionReport(rawConversion(source), source, worldId));
+  assert.equal(report.summary.errors, 0);
+  assert.equal(report.changedRefs.length, 3);
+  assert.equal(report.unverifiedWrites.length, 0);
+  assert.equal(report.cleanupFiles.length, 2);
+  assert.equal(source.entries[0].refs[0].newValue, "art/a.webp ", "manifest stays unchanged");
+  const imported = sanitizeMigrationReportForRollback(JSON.parse(JSON.stringify(report)), worldId);
+  const rollback = await rollbackMigration(imported);
+  assert.equal(rollback.changed, 3);
+  assert.equal(rollback.errors + rollback.stale, 0);
+  const expected = structuredClone(before);
+  expected.img = "art/a.png";
+  expected.flags.gallery[0].img = "art/a.png";
+  expected.flags.gallery[0].variants[0] = "art/b.png";
+  assert.deepEqual(doc.current(), expected);
+  assert.equal((await rollbackMigration(imported)).already, 3);
+});
+
+test("normalized exact rollback refuses later edits and unrelated saved-value metadata", async () => {
+  const doc = document("EditedNormalized", { faces: [{ img: "art/a.png " }] }, {
+    rewrite: (data) => { data.faces[0].img = data.faces[0].img.trim(); }
+  });
+  installGame([doc]);
+  const source = manifest([doc]);
+  const report = await applyMigration(source, createAssumedConversionReport(source));
+  await doc.update({ faces: [{ img: "art/a.webp?user-edit=1" }] });
+  assert.equal((await rollbackMigration(report)).stale, 1);
+  assert.equal(doc.current().faces[0].img, "art/a.webp?user-edit=1");
+  await doc.update({ faces: [{ img: "art/unrelated.webp" }] });
+  report.changedRefs[0].savedValue = "art/unrelated.webp";
+  const imported = sanitizeMigrationReportForRollback(JSON.parse(JSON.stringify(report)), worldId);
+  assert.equal((await rollbackMigration(imported)).stale, 1);
+  assert.equal(doc.current().faces[0].img, "art/unrelated.webp");
+});
+
+test("normalized reverse repair inside an array retains its forward rollback", async () => {
+  const doc = document("ReverseNormalized", { faces: [{ img: "art/a.webp ", name: "keep" }] }, {
+    rewrite: (data) => { data.faces[0].img = data.faces[0].img.trim(); }
+  });
+  installGame([doc]);
+  const source = manifest([doc]);
+  const raw = rawConsistency(source, (entry) => [{ oldPath: entry.oldPath, newPath: entry.newPath,
+    png: { exists: true, checked: true, valid: true, decoded: true, width: 10, height: 20, size: 100, sha256: "a".repeat(64), mtimeMs: 1 },
+    webp: { exists: false } }]);
+  const report = await applyConsistencyRepairs(source, sanitizeConsistencyReport(raw, source, worldId));
+  assert.equal(report.summary.errors, 0);
+  assert.equal(report.changedRefs.length, 1);
+  assert.equal(report.changedRefs[0].appliedDirection, "reverse");
+  assert.equal(doc.current().faces[0].img, "art/a.png");
+  const imported = sanitizeMigrationReportForRollback(JSON.parse(JSON.stringify(report)), worldId);
+  assert.equal((await rollbackMigration(imported)).changed, 1);
+  assert.deepEqual(doc.current().faces, [{ img: "art/a.webp", name: "keep" }]);
+  assert.equal((await rollbackMigration(imported)).already, 1);
+});
+
+test("array normalization allowance rejects sibling edits, missing elements and modified text", async () => {
+  const rewrites = [
+    (data) => { data.flags.gallery[0].caption = "changed"; },
+    (data) => { data.flags.gallery.pop(); },
+    (data) => { data.flags.gallery.reverse(); },
+    (data) => { data.flags.gallery[0].img = "art/unexpected.webp"; },
+    (data) => { data.flags.gallery[0].html += "<p>Unrelated edit</p>"; }
+  ];
+  for (const rewrite of rewrites) {
+    const doc = document("Damaged", { flags: { gallery: [
+      { img: "art/a.png ", caption: "keep", html: '<img src="art/b.png">' },
+      { img: "other.jpg", caption: "keep too" }
+    ] } }, { rewrite: (data) => {
+      data.flags.gallery[0].img = data.flags.gallery[0].img.trim();
+      rewrite(data);
+    } });
+    installGame([doc]);
+    const source = manifest([doc]);
+    const report = await applyMigration(source, sanitizeConversionReport(rawConversion(source), source, worldId));
+    assert.equal(report.summary.errors, 2);
+    assert.equal(report.changedRefs.length, 0);
+    assert.equal(report.unverifiedWrites.length, 2);
+    assert.deepEqual(report.cleanupFiles, []);
+  }
+});
+
 test("A02: an unmigrated exact alias blocks cleanup authorized by an overlapping wildcard", async () => {
   const wildcard = document("Wildcard", { img: "art/*.png" });
   const locked = document("Locked", { img: "art/a.png" }, { pack: { collection: "module.locked", locked: true, metadata: { packageType: "module" } } });
@@ -315,6 +408,43 @@ test("A13: wildcard import uses server case semantics and scans retain case alia
   assert.equal(migrated.changedRefs.length, 2);
   assert.equal(migrated.cleanupFiles.length, 1);
 });
+
+test("cleanup deduplicates case aliases only under the report case rule", () => temporary(async (directory, write) => {
+  fs.mkdirSync(path.join(directory, "worlds", worldId), { recursive: true });
+  const pngBytes = makePng();
+  const webpBytes = makeWebp();
+  // Both spellings exist on Linux; on Windows they address the same files.
+  write("art/A.png", pngBytes);
+  write("art/A.webp", webpBytes);
+  const png = write("art/a.png", pngBytes);
+  const webp = write("art/a.webp", webpBytes);
+  const file = { ...concrete("art/a.png"), oldSize: pngBytes.length, newSize: webpBytes.length,
+    oldWidth: 2, oldHeight: 3, newWidth: 2, newHeight: 3,
+    oldSha256: cli.sha256File(png), newSha256: cli.sha256File(webp) };
+  const migration = { type: "fbl-webp-migrator-migration-report", schemaVersion: 5, worldId,
+    sourceDataRootId: cli.validateDataRoot(directory).id,
+    cleanupFiles: [{ ...file, oldPath: "art/A.png", newPath: "art/A.webp" }, file] };
+  const reportPath = path.join(directory, "migration.json");
+  const out = path.join(directory, "cleanup.json");
+  for (const caseInsensitivePaths of [undefined, false, true]) {
+    write("migration.json", JSON.stringify({ ...migration, caseInsensitivePaths }));
+    const dry = cli.cleanup({ cleanup: reportPath, data: directory, out, "dry-run": true });
+    assert.equal(dry.summary.concreteFiles, caseInsensitivePaths === true ? 1 : 2);
+    assert.equal(dry.summary.wouldQuarantine, dry.summary.concreteFiles);
+    assert.ok(fs.existsSync(png));
+  }
+  const quarantined = cli.cleanup({ cleanup: reportPath, data: directory, out, delete: true });
+  assert.equal(quarantined.summary.quarantined, 1);
+  assert.equal(quarantined.summary.missingOld, 0);
+  assert.equal(quarantined.entries.length, 1);
+  assert.equal(fs.existsSync(png), false);
+  assert.equal(cli.restore({ restore: out, data: directory, out: path.join(directory, "restore.json") }).summary.restored, 1);
+  const deleted = cli.cleanup({ cleanup: reportPath, data: directory, out, delete: true, "permanent-delete": true });
+  assert.equal(deleted.summary.deleted, 1);
+  assert.equal(deleted.summary.missingOld, 0);
+  assert.equal(deleted.entries.length, 1);
+  assert.equal(fs.existsSync(png), false);
+}));
 
 test("A14: URL decoding happens once through scan, import, CLI, migration and rollback", () => temporary(async (directory, write) => {
   write("percent/foo%20bar.png", makePng(8, 8, { payload: 200 }));

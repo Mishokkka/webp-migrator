@@ -1192,7 +1192,8 @@ function cleanup(args) {
   const map = new Map();
   for (const input of migration.cleanupFiles) {
     const file = sanitizeCleanupFile(input);
-    map.set(`${file.oldPath}|${file.oldSha256}`, file);
+    const oldPathKey = migration.caseInsensitivePaths === true ? file.oldPath.toLowerCase() : file.oldPath;
+    map.set(`${oldPathKey}|${file.oldSha256}`, file);
   }
   const files = [...map.values()];
   configureDecoders(args);
