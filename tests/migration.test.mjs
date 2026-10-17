@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import {
   applyMigration,
   createAssumedConversionReport,
+  countCorePublicPlaceholderReferences,
   mergeMigrationReports,
   recoverPendingPackLocks,
+  rollbackCorePublicPlaceholders,
   rollbackMigration,
   sanitizeConversionReport,
   sanitizeMigrationReportForRollback
@@ -606,3 +608,26 @@ test("merged migration summary keeps conversion and consistency directions separ
   assert.equal(merged.summary.consistencyPlaceholderPaths, 1);
 });
 
+
+test("targeted Core Data rollback restores only placeholder replacements from Core Data", async () => {
+  const document = mockDocument({ img: "icons/svg/mystery-man.svg", system: { portrait: "icons/svg/mystery-man.svg" } });
+  installMockGame(document);
+  const coreRef = {
+    uuid: "Actor.A", documentName: "Actor", fieldPath: ["img"], fieldLabel: "img", rootField: "img", mode: "exact",
+    oldValue: "icons/core/original.png", newValue: "icons/core/original.webp", oldPath: "icons/core/original.png", newPath: "icons/core/original.webp",
+    migrationKind: "placeholder", placeholderSource: "old", placeholderValue: "icons/svg/mystery-man.svg", appliedDirection: "placeholder"
+  };
+  const userRef = {
+    uuid: "Actor.A", documentName: "Actor", fieldPath: ["system", "portrait"], fieldLabel: "system.portrait", rootField: "system", mode: "exact",
+    oldValue: "art/missing.png", newValue: "art/missing.webp", oldPath: "art/missing.png", newPath: "art/missing.webp",
+    migrationKind: "placeholder", placeholderSource: "old", placeholderValue: "icons/svg/mystery-man.svg", appliedDirection: "placeholder"
+  };
+  const report = {
+    type: "fbl-webp-migrator-migration-report", worldId: "world-a", changedRefs: [coreRef, userRef], summary: {}
+  };
+  assert.equal(countCorePublicPlaceholderReferences(report), 1);
+  const summary = await rollbackCorePublicPlaceholders(report, {});
+  assert.equal(summary.changed, 1);
+  assert.equal(document.current().img, "icons/core/original.png");
+  assert.equal(document.current().system.portrait, "icons/svg/mystery-man.svg");
+});

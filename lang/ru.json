@@ -185,5 +185,12 @@
   "FWM.Confirm.ImageHoverTitle": "Исправить Image Hover overrides",
   "FWM.Confirm.ImageHoverBody": "Версии 0.4.2/0.4.3 могли записать icons/svg/mystery-man.svg в Image Hover → Specific image on hover. Восстановление теперь независимо от обычных галочек сканирования: оно проверит все world Actors, все токены и вложенные ActorDelta во всех world Scenes, а также world Actor/Scene compendiums. Будут сброшены только поля specificArt, которые сейчас ТОЧНО равны этой заглушке. Они вернутся к path/image.png. Если вы намеренно выбирали mystery-man.svg именно как Specific image on hover, такие поля тоже будут сброшены.",
   "FWM.Status.RepairingImageHover": "Исправляю ошибочные overrides Image Hover...",
-  "FWM.Status.ImageHoverRepaired": "Image Hover: найдено {found}, исправлено {changed}, stale {stale}, ошибок {errors}."
+  "FWM.Status.ImageHoverRepaired": "Image Hover: найдено {found}, исправлено {changed}, stale {stale}, ошибок {errors}.",
+  "FWM.Actions.RestoreCoreData": "Восстановить Core Data",
+  "FWM.Confirm.CoreDataRollbackTitle": "Восстановить ссылки Foundry Core Data",
+  "FWM.Confirm.CoreDataRollbackBody": "Будут восстановлены только {count} ссылок, где placeholder-repair заменил исходный путь Foundry Core Data. Остальные изменения migration report не затрагиваются.",
+  "FWM.Status.RestoringCoreData": "Восстанавливаю ссылки Foundry Core Data...",
+  "FWM.Status.RestoringCoreDataDocument": "Восстанавливаю {current}/{total}: {label}",
+  "FWM.Status.CoreDataRestored": "Core Data: восстановлено {changed}, уже было исправлено {already}, stale {stale}, ошибок {errors}.",
+  "FWM.Errors.NoCoreDataRollback": "В импортированном migration report нет замененных ссылок Foundry Core Data."
 }

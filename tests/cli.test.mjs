@@ -110,6 +110,22 @@ test("path parser preserves wildcard question marks and literal hash characters"
   assert.throws(() => cli.normalizeRelativePath("\\\\server\\share\\a.png"), /UNC/);
 });
 
+
+test("CLI excludes Foundry Core Data public paths from conversion and audit", () => {
+  const entries = [
+    { oldPath: "icons/core/default.png", newPath: "icons/core/default.webp" },
+    { oldPath: "ui/background.png", newPath: "ui/background.webp" },
+    { oldPath: "3_F00L/art/hero.png", newPath: "3_F00L/art/hero.webp" }
+  ];
+  assert.deepEqual(cli.uniqueEntries(entries), [{ oldPath: "3_F00L/art/hero.png", newPath: "3_F00L/art/hero.webp" }]);
+  const auditEntries = cli.uniqueAuditEntries({
+    entries: entries.map((entry) => ({ ...entry, refs: [{}] })),
+    webpEntries: []
+  });
+  assert.equal(auditEntries.length, 1);
+  assert.equal(auditEntries[0].oldPath, "3_F00L/art/hero.png");
+});
+
 test("PNG and WebP inspection rejects truncated or container-only fakes", () => withCleanup((root) => {
   const png = write(root, "a.png", makePng(7, 9));
   const apng = write(root, "animated.png", makePng(7, 9, { animated: true }));

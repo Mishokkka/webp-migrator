@@ -185,5 +185,12 @@
   "FWM.Confirm.ImageHoverTitle": "Repair Image Hover overrides",
   "FWM.Confirm.ImageHoverBody": "Versions 0.4.2/0.4.3 could write icons/svg/mystery-man.svg into Image Hover → Specific image on hover. Recovery now ignores ordinary scan-scope checkboxes: it checks all world Actors, all Tokens and nested ActorDelta documents in all world Scenes, plus world Actor/Scene compendiums. Only specificArt fields whose current value is EXACTLY that placeholder are reset to path/image.png. If you intentionally selected mystery-man.svg as Specific image on hover, those fields will also be reset.",
   "FWM.Status.RepairingImageHover": "Repairing incorrect Image Hover overrides...",
-  "FWM.Status.ImageHoverRepaired": "Image Hover: found {found}, repaired {changed}, stale {stale}, errors {errors}."
+  "FWM.Status.ImageHoverRepaired": "Image Hover: found {found}, repaired {changed}, stale {stale}, errors {errors}.",
+  "FWM.Actions.RestoreCoreData": "Restore Core Data",
+  "FWM.Confirm.CoreDataRollbackTitle": "Restore Foundry Core Data references",
+  "FWM.Confirm.CoreDataRollbackBody": "Only {count} references where placeholder repair replaced an original Foundry Core Data path will be restored. Other migration report changes are not touched.",
+  "FWM.Status.RestoringCoreData": "Restoring Foundry Core Data references...",
+  "FWM.Status.RestoringCoreDataDocument": "Restoring {current}/{total}: {label}",
+  "FWM.Status.CoreDataRestored": "Core Data: restored {changed}, already correct {already}, stale {stale}, errors {errors}.",
+  "FWM.Errors.NoCoreDataRollback": "The imported migration report contains no replaced Foundry Core Data references."
 }

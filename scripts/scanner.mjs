@@ -10,6 +10,7 @@ import {
   collectWebpReferences,
   createId,
   deepClone,
+  isFoundryCorePublicAssetReference,
   isSafePathSegments,
   normalizePhysicalPath,
   normalizeWebpPhysicalPath,
@@ -338,6 +339,7 @@ export async function scanFoundry(options = {}, { onProgress, signal } = {}) {
     options: normalizedOptions,
     notes: [
       "oldPath/newPath are physical paths relative to Foundry UserData/Data.",
+      "Foundry Core Data public paths (cards/css/fonts/icons/lang/scripts/sounds/ui) are intentionally excluded.",
       "Reference data remains authoritative inside this manifest. Conversion reports never authorize document fields.",
       "Cleanup is safe only for the scopes selected during this scan.",
       normalizedOptions.chatMessages
@@ -386,6 +388,7 @@ function sanitizeImportedRef(ref, entry, sourceFormat = "png", caseInsensitive =
 
   const oldPath = normalizePhysicalPath(ref.oldValue);
   const newPath = normalizeWebpPhysicalPath(ref.newValue);
+  if (isFoundryCorePublicAssetReference(ref.oldValue) || isFoundryCorePublicAssetReference(ref.newValue)) return null;
   if (!oldPath || !newPath || toWebpPhysicalPath(oldPath) !== newPath) return null;
   if (pathKey(oldPath, caseInsensitive) !== pathKey(entry.oldPath, caseInsensitive)) return null;
   if (pathKey(newPath, caseInsensitive) !== pathKey(entry.newPath, caseInsensitive)) return null;
@@ -427,7 +430,7 @@ export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null, {
   const representatives = new Map();
   for (const input of rawEntries) {
     const oldPath = normalizePhysicalPath(input?.oldPath);
-    if (!oldPath) continue;
+    if (!oldPath || isFoundryCorePublicAssetReference(input?.oldPath)) continue;
     const key = pathKey(oldPath, caseInsensitive);
     if (!representatives.has(key)) representatives.set(key, oldPath);
   }
@@ -437,6 +440,10 @@ export function sanitizeManifest(raw, currentWorldId = game.world?.id ?? null, {
     for (const input of inputs ?? []) {
       const inputOldPath = normalizePhysicalPath(input?.oldPath);
       const inputNewPath = normalizeWebpPhysicalPath(input?.newPath);
+      if (isFoundryCorePublicAssetReference(input?.oldPath) || isFoundryCorePublicAssetReference(input?.newPath)) {
+        ignored.push({ oldPath: input?.oldPath ?? null, sourceFormat, reason: "Foundry Core Data path исключен из UserData миграции." });
+        continue;
+      }
       if (!inputOldPath || !inputNewPath || toWebpPhysicalPath(inputOldPath) !== inputNewPath) {
         ignored.push({ oldPath: input?.oldPath ?? null, sourceFormat, reason: "Некорректная пара oldPath/newPath." });
         continue;

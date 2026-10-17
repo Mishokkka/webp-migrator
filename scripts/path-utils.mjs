@@ -16,6 +16,7 @@ const TOKEN_PNG_RE = /(?:^|[\s=(,:;])((?!https?:|data:|blob:|file:|ftp:|s3:)[^\s
 const QUOTED_WEBP_RE = /(["'])((?!https?:|data:|blob:|file:|ftp:|s3:)[^"'<>\r\n]*?\.webp(?:[?#][^"'<>\r\n]*)?)\1/gi;
 const TOKEN_WEBP_RE = /(?:^|[\s=(,:;])((?!https?:|data:|blob:|file:|ftp:|s3:)[^\s"'()<>{}\[\],;]+?\.webp(?:[?#][^\s"'()<>{}\[\],;]*)?)/gi;
 const PATH_CONTINUATION_RE = /[A-Za-z0-9_%./\\-]/;
+const FOUNDRY_V13_PUBLIC_DIRS = new Set(["cards", "css", "fonts", "icons", "lang", "scripts", "sounds", "ui"]);
 
 function decodePath(value) {
   try {
@@ -92,6 +93,20 @@ export function splitPathSuffix(value) {
   return { path: source.slice(0, index), suffix: source.slice(index) };
 }
 
+export function isFoundryCorePublicAssetReference(value) {
+  const text = String(value ?? "").trim();
+  if (!text || isExternalReference(text)) return false;
+  const { path } = splitPathSuffix(text);
+  let normalized = decodePath(path).replace(/\\/g, "/");
+  while (normalized.startsWith("./")) normalized = normalized.slice(2);
+  normalized = normalized.replace(/^\/+/, "").replace(/\/{2,}/g, "/");
+  const first = normalized.split("/").find(Boolean)?.toLowerCase();
+  if (!first) return false;
+  const runtimeDirs = globalThis.CONST?.FILE_PICKER_PUBLIC_DIRS;
+  if (Array.isArray(runtimeDirs) && runtimeDirs.some((dir) => String(dir).toLowerCase() === first)) return true;
+  return FOUNDRY_V13_PUBLIC_DIRS.has(first);
+}
+
 export function isExternalReference(value) {
   const trimmed = String(value ?? "").trim();
   return EXTERNAL_SCHEME_RE.test(trimmed)
@@ -118,6 +133,7 @@ export function isWebpReference(value) {
 export function looksLikeAssetPath(value, keyHint = "", { allowBare = false } = {}) {
   if (!isPngReference(value)) return false;
   const trimmed = value.trim();
+  if (isFoundryCorePublicAssetReference(trimmed)) return false;
   if (allowBare || PATHISH_RE.test(trimmed)) return true;
   return ASSET_KEY_RE.test(keyHint);
 }
@@ -125,6 +141,7 @@ export function looksLikeAssetPath(value, keyHint = "", { allowBare = false } = 
 export function looksLikeWebpAssetPath(value, keyHint = "", { allowBare = false } = {}) {
   if (!isWebpReference(value)) return false;
   const trimmed = value.trim();
+  if (isFoundryCorePublicAssetReference(trimmed)) return false;
   if (allowBare || PATHISH_RE.test(trimmed)) return true;
   return ASSET_KEY_RE.test(keyHint);
 }
@@ -240,7 +257,7 @@ export function findRichPngReferences(text) {
 
 function addRichWebpCandidate(matches, seen, candidate) {
   const value = String(candidate ?? "").trim();
-  if (!value || seen.has(value) || !normalizeWebpPhysicalPath(value)) return;
+  if (!value || seen.has(value) || isFoundryCorePublicAssetReference(value) || !normalizeWebpPhysicalPath(value)) return;
   seen.add(value);
   matches.push(value);
 }

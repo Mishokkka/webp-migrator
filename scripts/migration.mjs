@@ -9,6 +9,7 @@ import {
   deepClone,
   getAtPath,
   globToRegExp,
+  isFoundryCorePublicAssetReference,
   isSafePathSegments,
   findRichPngReferences,
   findRichWebpReferences,
@@ -252,6 +253,29 @@ export function validateReference(ref) {
   return ref.migrationKind === "placeholder"
     && (ref.placeholderSource === "old" || ref.placeholderSource === "new")
     && isAllowedPlaceholderValue(ref, ref.placeholderValue, MISSING_ASSET_PLACEHOLDER);
+}
+
+export function isCorePublicPlaceholderReference(ref) {
+  if (!validateReference(ref) || ref.appliedDirection !== "placeholder" || ref.migrationKind !== "placeholder") return false;
+  const originalValue = ref.placeholderSource === "new" ? ref.newValue : ref.oldValue;
+  return isFoundryCorePublicAssetReference(originalValue);
+}
+
+export function countCorePublicPlaceholderReferences(report) {
+  return (report?.changedRefs ?? []).filter(isCorePublicPlaceholderReference).length;
+}
+
+export function withoutCorePublicPlaceholderReferences(report) {
+  if (!report || typeof report !== "object") return report;
+  const changedRefs = (report.changedRefs ?? []).filter((ref) => !isCorePublicPlaceholderReference(ref));
+  return {
+    ...deepClone(report),
+    changedRefs,
+    summary: {
+      ...deepClone(report.summary ?? {}),
+      changedReferences: changedRefs.length
+    }
+  };
 }
 
 function validNumber(value, { minimum = 0 } = {}) {
@@ -1082,6 +1106,14 @@ export function mergeMigrationReports(previous, current) {
     issues,
     summary
   };
+}
+
+export async function rollbackCorePublicPlaceholders(migrationReport, options = {}, hooks = {}) {
+  const changedRefs = (migrationReport?.changedRefs ?? []).filter(isCorePublicPlaceholderReference);
+  if (!changedRefs.length) throw new Error("В migration report нет замененных ссылок Foundry Core Data для восстановления.");
+  const filtered = { ...deepClone(migrationReport), changedRefs };
+  const summary = await rollbackMigration(filtered, options, hooks);
+  return { ...summary, matched: changedRefs.length };
 }
 
 export async function rollbackMigration(migrationReport, options = {}, { onProgress, signal } = {}) {
