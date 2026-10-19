@@ -83,6 +83,7 @@ function concreteFile(overrides = {}) {
     newWidth: 10,
     newHeight: 20,
     sourceAnimated: false,
+    decoderVerified: true,
     provenance: "converted",
     ...overrides
   };
@@ -91,6 +92,7 @@ function concreteFile(overrides = {}) {
 function reportFor(overrides = {}) {
   return {
     type: "fbl-webp-migrator-conversion-report",
+    schemaVersion: 5,
     sourceManifestId: "manifest-a",
     sourceWorldId: "world-a",
     dataRootId: `sha256:${"c".repeat(64)}`,
@@ -151,6 +153,7 @@ test("a forged in-memory assume-existing report cannot call the mutation API", a
   const manifest = manifestFor([exactRef()]);
   const forged = {
     type: "fbl-webp-migrator-conversion-report",
+    schemaVersion: 5,
     sourceManifestId: "manifest-a",
     sourceWorldId: "world-a",
     entries: [{ oldPath: "art/a.png", newPath: "art/a.webp", status: "assume-existing", files: [] }]

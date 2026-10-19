@@ -6,6 +6,7 @@ import {
   mergeMigrationReports,
   rollbackCorePublicPlaceholders,
   rollbackMigration,
+  revokeCleanupAuthorization,
   withoutCorePublicPlaceholderReferences,
   sanitizeConversionReport,
   sanitizeMigrationReportForRollback
@@ -354,7 +355,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       hasReport: !!state.conversionReport,
       hasConsistencyReport: !!state.consistencyReport,
       hasMigrationReport: !!state.migrationReport,
-      hasRollbackReport: !!state.rollbackReport?.changedRefs?.length,
+      hasRollbackReport: !!(state.rollbackReport?.changedRefs?.length || state.rollbackReport?.textChanges?.length),
       canExportManifest: !state.busy && !!state.manifest,
       canAssumeConverted: !state.busy && !!state.manifest,
       canApplyReport: !state.busy && !!state.manifest && !!state.conversionReport,
@@ -368,7 +369,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         && (state.consistencyReport.summary?.placeholderRepairPaths ?? 0) > 0,
       canRepairImageHover: !state.busy,
       canExportMigrationReport: !state.busy && !!state.migrationReport,
-      canRollback: !state.busy && !!state.rollbackReport?.changedRefs?.length,
+      canRollback: !state.busy && !!(state.rollbackReport?.changedRefs?.length || state.rollbackReport?.textChanges?.length),
       canRollbackCorePublic: !state.busy && countCorePublicPlaceholderReferences(state.rollbackReport) > 0,
       corePublicRollbackCount: countCorePublicPlaceholderReferences(state.rollbackReport),
       canCancel: state.busy && !!this._activeController,
@@ -397,9 +398,9 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
       manifestName,
       migrationName,
       conversionCommand: `node tools/convert-cwebp.js --manifest "${manifestName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}" --cwebp "C:\\libwebp\\bin\\cwebp.exe" --quality 85`,
-      consistencyCommand: `node tools/convert-cwebp.js --audit "${manifestName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}"`,
-      cleanupCommand: `node tools/convert-cwebp.js --cleanup "${migrationName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}"`,
-      quarantineCommand: `node tools/convert-cwebp.js --cleanup "${migrationName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}" --delete`,
+      consistencyCommand: `node tools/convert-cwebp.js --audit "${manifestName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}" --cwebp "C:\\libwebp\\bin\\cwebp.exe"`,
+      cleanupCommand: `node tools/convert-cwebp.js --cleanup "${migrationName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}" --cwebp "C:\\libwebp\\bin\\cwebp.exe"`,
+      quarantineCommand: `node tools/convert-cwebp.js --cleanup "${migrationName}" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}" --cwebp "C:\\libwebp\\bin\\cwebp.exe" --delete`,
       restoreCommand: `node tools/convert-cwebp.js --restore "cleanup-report-....json" --data "C:\\FoundryVTT\\Data" --world-id "${worldPart}"`
     };
   }
@@ -459,6 +460,9 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
     await this._renderNow();
     try {
       await task(actionOptions, this._activeController.signal);
+      if (this._activeController.signal.aborted && this._viewState.migrationReport?.cancelled) {
+        this._setStatus(tr("FWM.Status.CancelledPartial", "Операция остановлена. Отчёт о выполненных изменениях сохранён; его можно экспортировать и использовать для отката."), { force: true });
+      }
     } catch (error) {
       if (error?.name === "AbortError") {
         this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
@@ -815,6 +819,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
         return;
       }
+      revokeCleanupAuthorization(this._viewState.migrationReport);
       const summary = await rollbackCorePublicPlaceholders(report, options, {
         onProgress: ({ current, total, label }) => {
           this._setStatus(tr("FWM.Status.RestoringCoreDataDocument", `Восстанавливаю ${current}/${total}: ${label}`, { current, total, label }));
@@ -822,10 +827,10 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         signal
       });
       this._viewState.rollbackSummary = summary;
-      const complete = summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
+      const complete = !summary.cancelled && summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
       if (complete) {
         const remaining = withoutCorePublicPlaceholderReferences(report);
-        this._viewState.rollbackReport = remaining.changedRefs.length ? remaining : null;
+        this._viewState.rollbackReport = (remaining.changedRefs.length || remaining.textChanges?.length) ? remaining : null;
       }
       this._setStatus(tr("FWM.Status.CoreDataRestored", `Core Data: восстановлено ${summary.changed}, уже было исправлено ${summary.already}, stale ${summary.stale}, ошибок ${summary.errors}.`, {
         changed: summary.changed, already: summary.already, stale: summary.stale, errors: summary.errors
@@ -837,7 +842,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
     event.preventDefault();
     return this._runAction(tr("FWM.Status.RollingBack", "Откатываю WEBP-пути..."), async (options, signal) => {
       const report = this._viewState.rollbackReport;
-      if (!report?.changedRefs?.length) throw new Error(tr("FWM.Errors.NoRollback", "Нет сохраненных ссылок для отката."));
+      if (!report?.changedRefs?.length && !report?.textChanges?.length) throw new Error(tr("FWM.Errors.NoRollback", "Нет сохраненных ссылок для отката."));
       const confirmed = await confirmAction({
         title: tr("FWM.Confirm.RollbackTitle", "Откатить пути"),
         content: `<p>${tr("FWM.Confirm.RollbackBody", "Модуль вернет только ссылки, измененные сохраненными migration reports. Файлы на диске не меняются.")}</p>`,
@@ -847,6 +852,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         this._setStatus(tr("FWM.Status.Cancelled", "Действие отменено."), { force: true });
         return;
       }
+      revokeCleanupAuthorization(this._viewState.migrationReport);
       const summary = await rollbackMigration(report, options, {
         onProgress: ({ current, total, label }) => {
           this._setStatus(tr("FWM.Status.RollingBackDocument", `Откатываю ${current}/${total}: ${label}`, { current, total, label }));
@@ -854,7 +860,7 @@ export class WebpMigratorApp extends HandlebarsApplicationMixin(ApplicationV2) {
         signal
       });
       this._viewState.rollbackSummary = summary;
-      const rollbackComplete = summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
+      const rollbackComplete = !summary.cancelled && summary.stale === 0 && summary.errors === 0 && summary.lockRestoreErrors === 0;
       if (rollbackComplete) {
         this._viewState.rollbackReport = null;
         this._viewState.migrationReport = null;

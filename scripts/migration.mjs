@@ -6,6 +6,7 @@ import {
   VERIFIED_CONVERSION_STATUSES
 } from "./constants.mjs";
 import {
+  createId,
   deepClone,
   getAtPath,
   globToRegExp,
@@ -14,12 +15,14 @@ import {
   findRichPngReferences,
   findRichWebpReferences,
   normalizePhysicalPath,
+  normalizePngFilePath,
+  normalizeWebpFilePath,
+  toWebpFilePath,
   normalizeWebpPhysicalPath,
   replaceTextReference,
   sanitizeJsonValue,
   setAtPath,
-  toWebpReference,
-  toWebpPhysicalPath
+  toWebpReference
 } from "./path-utils.mjs";
 import { getPackPackageType } from "./scanner.mjs";
 import { isAllowedPlaceholderValue } from "./compatibility.mjs";
@@ -242,9 +245,9 @@ function validateStandardReferenceShape(ref) {
     && normalizePhysicalPath(ref.oldValue) === ref.oldPath
     && normalizeWebpPhysicalPath(ref.newValue) === ref.newPath
     && toWebpReference(ref.oldValue) === ref.newValue
-    && normalizePhysicalPath(ref.oldPath) === ref.oldPath
-    && normalizeWebpPhysicalPath(ref.newPath) === ref.newPath
-    && toWebpPhysicalPath(ref.oldPath) === ref.newPath;
+    && normalizePngFilePath(ref.oldPath) === ref.oldPath
+    && normalizeWebpFilePath(ref.newPath) === ref.newPath
+    && toWebpFilePath(ref.oldPath) === ref.newPath;
 }
 
 export function validateReference(ref) {
@@ -271,6 +274,8 @@ export function withoutCorePublicPlaceholderReferences(report) {
   return {
     ...deepClone(report),
     changedRefs,
+    textChanges: sanitizeTextChanges(report.textChanges).filter((change) => !change.operations.every(({ ref }) =>
+      isCorePublicPlaceholderReference({ ...ref, appliedDirection: "placeholder" }))),
     summary: {
       ...deepClone(report.summary ?? {}),
       changedReferences: changedRefs.length
@@ -286,25 +291,25 @@ function validDimension(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function patternMatches(pattern, value) {
+function patternMatches(pattern, value, caseInsensitive = false) {
   try {
-    return globToRegExp(pattern).test(value);
+    return globToRegExp(pattern, { caseInsensitive }).test(value);
   } catch {
     return false;
   }
 }
 
-function sanitizeConcreteFile(input, sourceEntry) {
+function sanitizeConcreteFile(input, sourceEntry, caseInsensitive = false) {
   if (!input || typeof input !== "object") return null;
-  const oldPath = normalizePhysicalPath(input.oldPath);
-  const newPath = normalizeWebpPhysicalPath(input.newPath);
+  const oldPath = normalizePngFilePath(input.oldPath);
+  const newPath = normalizeWebpFilePath(input.newPath);
   if (!oldPath || !newPath || /[*?]/.test(oldPath) || /[*?]/.test(newPath)) return null;
-  if (toWebpPhysicalPath(oldPath) !== newPath) return null;
+  if (toWebpFilePath(oldPath) !== newPath) return null;
   if (sourceEntry.wildcard) {
-    if (!patternMatches(sourceEntry.oldPath, oldPath) || !patternMatches(sourceEntry.newPath, newPath)) return null;
+    if (!patternMatches(sourceEntry.oldPath, oldPath, caseInsensitive) || !patternMatches(sourceEntry.newPath, newPath, caseInsensitive)) return null;
   } else if (oldPath !== sourceEntry.oldPath || newPath !== sourceEntry.newPath) return null;
 
-  const status = normalizeStatus(input.status);
+  let status = normalizeStatus(input.status);
   if (!CONCRETE_SUCCESS_STATUSES.has(status) && status !== "skipped" && status !== "failed" && status !== "larger") return null;
 
   const oldSize = validNumber(input.oldSize);
@@ -320,6 +325,11 @@ function sanitizeConcreteFile(input, sourceEntry) {
     ? !!(newSha256 && newSize != null && newWidth && newHeight)
     : !!(oldSha256 && newSha256 && oldSize != null && newSize != null && oldWidth && oldHeight && newWidth && newHeight);
   const dimensionsMatch = status === "exists-missing-old" || (oldWidth === newWidth && oldHeight === newHeight);
+  const evidenceComplete = fingerprintsComplete && dimensionsMatch && !sourceAnimated
+    && newSize > 0 && validNumber(input.newMtimeMs) != null
+    && (status === "exists-missing-old" || (oldSize > 0 && validNumber(input.oldMtimeMs) != null))
+    && input.decoderVerified === true;
+  if (CONCRETE_SUCCESS_STATUSES.has(status) && !evidenceComplete) status = "failed";
   const cleanupEligible = (status === "converted" || status === "exists")
     && fingerprintsComplete
     && dimensionsMatch
@@ -341,6 +351,7 @@ function sanitizeConcreteFile(input, sourceEntry) {
     newWidth,
     newHeight,
     sourceAnimated,
+    decoderVerified: input.decoderVerified === true,
     provenance: input.provenance === "existing" ? "existing" : input.provenance === "converted" ? "converted" : null,
     cleanupEligible,
     error: typeof input.error === "string" ? input.error : undefined
@@ -394,6 +405,8 @@ export function sanitizeConversionReport(report, manifest, currentWorldId = game
   if (report.sourceManifestId !== manifest.manifestId) throw new Error("Conversion report создан для другого manifest. Импорт отклонён.");
   if (manifest.worldId !== currentWorldId || report.sourceWorldId !== currentWorldId) throw new Error("Manifest или conversion report относятся к другому миру.");
 
+  if (!(Number(report.schemaVersion) >= 5)) throw new Error("Conversion report устарел. Повтори конвертацию или проверку инструментом 0.4.8+ с декодированием файлов.");
+  if (!DATA_ROOT_ID_RE.test(String(report.dataRootId ?? ""))) throw new Error("Conversion report не содержит корректной привязки к Foundry Data root.");
   const manifestEntries = new Map((manifest.entries ?? []).map((entry) => [entry.oldPath, entry]));
   const entries = [];
   const ignored = [];
@@ -418,9 +431,9 @@ export function sanitizeConversionReport(report, manifest, currentWorldId = game
     }
 
     const files = Array.isArray(input.files)
-      ? input.files.map((file) => sanitizeConcreteFile(file, source)).filter(Boolean)
+      ? input.files.map((file) => sanitizeConcreteFile(file, source, report.caseInsensitivePaths === true)).filter(Boolean)
       : [];
-    const status = aggregateSanitizedStatus(files);
+    const status = files.length === input.files?.length ? aggregateSanitizedStatus(files) : "failed";
     const oldPairs = files.filter((file) => Number.isFinite(file.oldSize));
     const newPairs = files.filter((file) => Number.isFinite(file.newSize));
     const oldSize = oldPairs.length ? oldPairs.reduce((sum, file) => sum + file.oldSize, 0) : null;
@@ -451,6 +464,7 @@ export function sanitizeConversionReport(report, manifest, currentWorldId = game
     sourceManifestId: report.sourceManifestId,
     sourceWorldId: report.sourceWorldId,
     dataRootId: DATA_ROOT_ID_RE.test(String(report.dataRootId ?? "")) ? String(report.dataRootId).toLowerCase() : null,
+    caseInsensitivePaths: report.caseInsensitivePaths === true,
     options: sanitizeJsonValue(report.options ?? {}),
     ignored,
     entries,
@@ -533,6 +547,7 @@ function verifyReference(source, ref, reverse = false) {
     const normalized = reverse ? normalizePhysicalPath(current) : normalizeWebpPhysicalPath(current);
     return normalized === expectedPath;
   }
+  if (replaceTextReference(current, opposite, expected).status === "changed") return false;
   if (replaceTextReference(current, expected, opposite).status === "changed") return true;
   if (typeof current !== "string") return false;
   const expectedCandidates = reverse ? findRichPngReferences(current) : findRichWebpReferences(current);
@@ -540,6 +555,18 @@ function verifyReference(source, ref, reverse = false) {
   const paths = expectedCandidates.map((value) => reverse ? normalizePhysicalPath(value) : normalizeWebpPhysicalPath(value)).filter(Boolean);
   const oppositePaths = oppositeCandidates.map((value) => reverse ? normalizeWebpPhysicalPath(value) : normalizePhysicalPath(value)).filter(Boolean);
   return paths.includes(expectedPath) && !oppositePaths.includes(oppositePath);
+}
+
+// Rollback must match the actual saved value when Foundry cleaned an exact
+// reference. Re-check its path so imported metadata cannot redirect the write.
+function replaceRollbackReference(source, ref, reverse) {
+  const current = getAtPath(source, ref.fieldPath);
+  if (ref.mode === "text") return { status: "stale", value: current };
+  if (verifyReference(source, ref, reverse)) return { status: "already", value: current };
+  if (current === ref.savedValue && verifyReference(source, ref, !reverse)) {
+    return { status: "changed", value: referenceOperationValues(ref, reverse).target };
+  }
+  return replaceReference(current, ref, reverse);
 }
 
 async function readPendingRelocks() {
@@ -671,18 +698,72 @@ function fieldPathToUpdateKey(segments) {
   return segments.map(String).join(".");
 }
 
+function updatePathFor(source, segments) {
+  for (let index = 1; index < segments.length; index += 1) {
+    if (Array.isArray(getAtPath(source, segments.slice(0, index)))) return segments.slice(0, index);
+  }
+  return segments;
+}
+
+function textFieldKey(ref) {
+  return `${ref.uuid}|${JSON.stringify(ref.fieldPath)}`;
+}
+
+function sanitizeTextChanges(changes) {
+  const output = [];
+  const seen = new Set();
+  for (const input of Array.isArray(changes) ? changes : []) {
+    if (typeof input?.id !== "string" || seen.has(input.id) || typeof input.before !== "string"
+      || typeof input.after !== "string" || input.before === input.after
+      || !Array.isArray(input.operations) || !input.operations.length) continue;
+    const ref = input.operations[0]?.ref;
+    let value = input.before;
+    let valid = true;
+    for (const operation of input.operations) {
+      if (!validateReference(operation.ref) || operation.ref.mode !== "text"
+        || textFieldKey(operation.ref) !== textFieldKey(ref)) { valid = false; break; }
+      const result = replaceReference(value, operation.ref, operation.reverse === true);
+      if (result.status !== "changed") { valid = false; break; }
+      value = result.value;
+    }
+    if (!valid || value !== input.after) continue;
+    seen.add(input.id);
+    output.push(deepClone(input));
+  }
+  return output;
+}
+
+// Invalidate cleanup before rollback starts, including partial/cancelled runs.
+export function revokeCleanupAuthorization(report) {
+  if (!report) return report;
+  report.cleanupFiles = [];
+  report.cleanupRevoked = true;
+  if (report.summary) report.summary.cleanupEligibleFiles = 0;
+  for (const item of report.migrated ?? []) item.cleanupEligibleFiles = 0;
+  return report;
+}
+
 async function yieldToBrowser() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-export async function processDocumentTasks(entries, options, reverse, { onProgress, signal } = {}) {
+export async function processDocumentTasks(entries, options, reverse, { onProgress, signal, textRestore = null, rollbackWithoutSnapshots = false } = {}) {
   const { byUuid, results, expectedByEntry } = collectTasks(entries);
   const unlockedPacks = new Map();
   const groups = [...byUuid.entries()];
+  const textChanges = [];
+  const unverifiedWrites = [];
+  let cancelled = false;
 
   try {
     for (let index = 0; index < groups.length; index += 1) {
-      if (signal?.aborted) throw new DOMException("Операция отменена.", "AbortError");
+      if (signal?.aborted) {
+        cancelled = true;
+        for (const [, remaining] of groups.slice(index)) {
+          for (const task of remaining) results.push({ ...task.resultBase, status: "skipped", error: "Операция отменена до записи документа." });
+        }
+        break;
+      }
       const [uuid, tasks] = groups[index];
       const firstRef = tasks[0]?.ref;
       let context;
@@ -698,7 +779,8 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
       }
 
       const labelDocument = context.kind === "actor-delta" ? context.token : context.target;
-      onProgress?.({ current: index + 1, total: groups.length, label: labelDocument?.name ?? labelDocument?.id ?? uuid });
+      try { onProgress?.({ current: index + 1, total: groups.length, label: labelDocument?.name ?? labelDocument?.id ?? uuid }); }
+      catch (error) { console.warn("FBL WebP Migrator | Progress callback failed", error); }
       const pack = context.pack ?? getPack(context.root ?? context.target);
       if (pack && !isWorldPack(pack) && !options.allowPackageCompendiumWrites) {
         for (const task of tasks) results.push({
@@ -708,7 +790,13 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
         });
         continue;
       }
-      if (pack && !await unlockPackIfNeeded(pack, options, unlockedPacks)) {
+      let writable = true;
+      try { if (pack) writable = await unlockPackIfNeeded(pack, options, unlockedPacks); }
+      catch (error) {
+        for (const task of tasks) results.push({ ...task.resultBase, status: "error", error: error?.message ?? String(error) });
+        continue;
+      }
+      if (!writable) {
         for (const task of tasks) results.push({
           ...task.resultBase,
           status: "skipped",
@@ -717,13 +805,32 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
         continue;
       }
 
+      // Unlocking a pack can await a server round trip; refresh the source before
+      // copying arrays so changes made during that wait are preserved.
+      try { context = await resolveReferenceContext(firstRef, { fresh: true }); }
+      catch (error) {
+        for (const task of tasks) results.push({ ...task.resultBase, status: "error", error: error?.message ?? String(error) });
+        continue;
+      }
+      if (!context?.source) {
+        for (const task of tasks) results.push({ ...task.resultBase, status: "error", error: "Document disappeared before update." });
+        continue;
+      }
+      if (signal?.aborted) { index -= 1; continue; }
       const working = deepClone(context.source);
+      const stagedText = new Map();
+      const updatePaths = new Map();
       const updateData = {};
       const pending = [];
 
       for (const task of tasks) {
         const current = getAtPath(working, task.ref.fieldPath);
-        const replacement = replaceReference(current, task.ref, reverse);
+        const replacement = textRestore
+          ? { status: current === textRestore.before || textRestore.earlierValues?.includes(current)
+            ? "already" : current === textRestore.after ? "changed" : "stale", value: textRestore.before }
+          : (rollbackWithoutSnapshots
+            ? replaceRollbackReference(working, task.ref, reverse)
+            : replaceReference(current, task.ref, reverse));
         if (replacement.status === "already") {
           results.push({ ...task.resultBase, status: "already" });
           continue;
@@ -732,12 +839,15 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
           results.push({
             ...task.resultBase,
             status: "stale",
-            error: "Поле изменилось после сканирования или больше не содержит ожидаемый путь."
+            error: rollbackWithoutSnapshots && task.ref.mode === "text"
+              ? "Без исходного снимка текста безопасный откат неоднозначен. Используй резервную копию или восстанови поле вручную."
+              : "Поле изменилось после сканирования или больше не содержит ожидаемый путь."
           });
           continue;
         }
         try {
-          const updateKey = fieldPathToUpdateKey(task.ref.fieldPath);
+          const updatePath = updatePathFor(working, task.ref.fieldPath);
+          const updateKey = fieldPathToUpdateKey(updatePath);
           if (!updateKey) {
             results.push({
               ...task.resultBase,
@@ -747,7 +857,14 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
             continue;
           }
           setAtPath(working, task.ref.fieldPath, replacement.value);
-          updateData[updateKey] = replacement.value;
+          updatePaths.set(updateKey, updatePath);
+          if (task.ref.mode === "text" && !textRestore) {
+            const key = textFieldKey(task.ref);
+            if (!stagedText.has(key)) stagedText.set(key, { id: createId(), before: current, after: replacement.value, operations: [] });
+            const change = stagedText.get(key);
+            change.after = replacement.value;
+            change.operations.push({ ref: deepClone(task.ref), reverse: reverse === true });
+          }
           const result = { ...task.resultBase, status: "pending" };
           pending.push(result);
           results.push(result);
@@ -757,6 +874,7 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
       }
 
       if (!pending.length) continue;
+      for (const [key, segments] of updatePaths) updateData[key] = deepClone(getAtPath(working, segments));
 
       let writeError = null;
       try {
@@ -782,13 +900,44 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
       // failed. Fresh verification is authoritative: if the expected value is
       // present, record the change so rollback history is never lost.
       const updatedSource = verifiedContext?.source ?? null;
+      for (const change of stagedText.values()) {
+        const ref = change.operations[0].ref;
+        if (updatedSource && getAtPath(updatedSource, ref.fieldPath) === change.after) textChanges.push(change);
+      }
+      const arraysIntact = updatedSource && [...updatePaths.values()].every((segments) => {
+        const staged = getAtPath(working, segments);
+        if (!Array.isArray(staged)) return true;
+        const observed = deepClone(getAtPath(updatedSource, segments));
+        if (!Array.isArray(observed)) return false;
+        for (const { ref } of pending) {
+          const leaf = ref.fieldPath;
+          if (ref.mode !== "exact" || leaf.length <= segments.length
+            || !segments.every((segment, index) => leaf[index] === segment)) continue;
+          // Only verified exact asset leaves may differ after Foundry cleaning.
+          // Text snapshots and every sibling element/field must match exactly.
+          if (verifyReference(updatedSource, ref, reverse)) {
+            setAtPath(observed, leaf.slice(segments.length), getAtPath(working, leaf));
+          }
+        }
+        return JSON.stringify(observed) === JSON.stringify(staged);
+      });
       for (const pendingResult of pending) {
-        if (updatedSource && verifyReference(updatedSource, pendingResult.ref, reverse)) {
+        if (arraysIntact && (textRestore
+          ? getAtPath(updatedSource, pendingResult.ref.fieldPath) === textRestore.before
+          : verifyReference(updatedSource, pendingResult.ref, reverse))) {
           pendingResult.status = "changed";
+          if (!rollbackWithoutSnapshots && pendingResult.ref.mode === "exact") {
+            const saved = getAtPath(updatedSource, pendingResult.ref.fieldPath);
+            if (saved !== referenceOperationValues(pendingResult.ref, reverse).target) pendingResult.ref.savedValue = saved;
+          }
           if (writeError) pendingResult.warning = `Foundry сообщил ошибку после записи: ${writeError?.message ?? String(writeError)}`;
           continue;
         }
 
+        unverifiedWrites.push({ ref: deepClone(pendingResult.ref),
+          before: getAtPath(context.source, pendingResult.ref.fieldPath),
+          intended: getAtPath(working, pendingResult.ref.fieldPath),
+          observed: updatedSource ? getAtPath(updatedSource, pendingResult.ref.fieldPath) : null });
         pendingResult.status = "error";
         if (verificationError) {
           pendingResult.error = `Не удалось перечитать документ после записи: ${verificationError?.message ?? String(verificationError)}`;
@@ -815,7 +964,7 @@ export async function processDocumentTasks(entries, options, reverse, { onProgre
     for (const issue of lockIssues) results.push({ entryOldPath: null, entryNewPath: null, ref: null, ...issue });
   }
 
-  return { results, expectedByEntry };
+  return { results, expectedByEntry, textChanges, unverifiedWrites, cancelled: cancelled || signal?.aborted === true };
 }
 
 function resultForEntry(results, oldPath) {
@@ -846,13 +995,21 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
     autoUnlockWorldPacks: options.autoUnlockWorldPacks !== false,
     allowPackageCompendiumWrites: options.allowPackageCompendiumWrites === true
   };
-  const { results, expectedByEntry } = await processDocumentTasks(entries, normalizedOptions, false, { onProgress, signal });
+  const { results, expectedByEntry, textChanges, unverifiedWrites, cancelled } = await processDocumentTasks(entries, normalizedOptions, false, { onProgress, signal });
 
   const migrated = [];
   const skipped = [];
   const cleanupFiles = [];
   const cleanupDedupe = new Set();
 
+  const fullyHandledPaths = new Set(entries.filter((entry) => {
+    const relevant = resultForEntry(results, entry.oldPath).filter((result) => result.ref);
+    const expected = expectedByEntry.get(entry.oldPath)?.size ?? 0;
+    return expected > 0 && relevant.length === expected && relevant.every((result) => ["changed", "already"].includes(result.status));
+  }).map((entry) => entry.oldPath));
+  const cleanupSafe = (file) => !manifest.summary?.skippedSources && !(manifest.skipped?.length)
+    && (manifest.entries ?? []).every((entry) => !patternMatches(entry.oldPath, file.oldPath, conversionReport.caseInsensitivePaths === true)
+      || fullyHandledPaths.has(entry.oldPath));
   for (const entry of entries) {
     const entryResults = resultForEntry(results, entry.oldPath);
     const expectedCount = expectedByEntry.get(entry.oldPath)?.size ?? 0;
@@ -876,7 +1033,7 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
 
     if (fullyMigrated) {
       for (const file of entry.conversion.files ?? []) {
-        if (!file.cleanupEligible) continue;
+        if (!file.cleanupEligible || !cleanupSafe(file)) continue;
         const key = cleanupFileKey(file);
         if (cleanupDedupe.has(key)) continue;
         cleanupDedupe.add(key);
@@ -887,6 +1044,13 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
     } else {
       skipped.push({ ...item, reason: "Не все ссылки текущего manifest обновлены или уже указывали на WEBP." });
     }
+  }
+  const selectedPaths = new Set(entries.map((entry) => entry.oldPath));
+  for (const entry of manifest.entries ?? []) {
+    if (selectedPaths.has(entry.oldPath)) continue;
+    skipped.push({ oldPath: entry.oldPath, newPath: entry.newPath, wildcard: !!entry.wildcard,
+      refCount: entry.refs?.length ?? 0, changed: 0, already: 0, stale: 0, errors: 0, cleanupEligibleFiles: 0,
+      reason: "Conversion evidence did not authorize this path. Existing cleanup permissions are revoked." });
   }
 
   const changedRefs = results
@@ -906,8 +1070,13 @@ export async function applyMigration(manifest, conversionReport, options = {}, {
     worldId: manifest.worldId,
     worldTitle: manifest.worldTitle,
     options: normalizedOptions,
+    caseInsensitivePaths: conversionReport.caseInsensitivePaths === true,
+    textChanges,
+    unverifiedWrites,
+    cancelled,
+    cleanupRevoked: !!manifest.summary?.skippedSources || !!manifest.skipped?.length,
     summary: {
-      inputEntries: entries.length,
+      inputEntries: manifest.entries?.length ?? 0,
       fullyMigratedPngPaths: migrated.length,
       cleanupEligibleFiles: cleanupFiles.length,
       skippedPngPaths: skipped.length,
@@ -949,7 +1118,9 @@ export function sanitizeMigrationReportForRollback(raw, currentWorldId = game.wo
         : input.appliedDirection === "reverse" ? "reverse" : "forward"
     });
   }
-  if (!changedRefs.length) throw new Error("В migration report нет допустимых ссылок для отката.");
+  const textChanges = sanitizeTextChanges(raw.textChanges);
+  if (!changedRefs.length && !textChanges.length) throw new Error("В migration report нет допустимых ссылок для отката.");
+  const cleanupRevoked = raw.cleanupRevoked === true || !(Number(raw.schemaVersion) >= 5);
   return {
     type: raw.type,
     schemaVersion: REPORT_SCHEMA_VERSION,
@@ -960,11 +1131,15 @@ export function sanitizeMigrationReportForRollback(raw, currentWorldId = game.wo
     worldId: currentWorldId,
     worldTitle: typeof raw.worldTitle === "string" ? raw.worldTitle : game.world?.title ?? null,
     options: sanitizeJsonValue(raw.options ?? {}),
-    summary: sanitizeJsonValue(raw.summary ?? {}),
+    summary: { ...sanitizeJsonValue(raw.summary ?? {}), ...(cleanupRevoked ? { cleanupEligibleFiles: 0 } : {}) },
     migrated: Array.isArray(raw.migrated) ? sanitizeJsonValue(raw.migrated) : [],
-    cleanupFiles: Array.isArray(raw.cleanupFiles) ? sanitizeJsonValue(raw.cleanupFiles) : [],
+    cleanupFiles: !cleanupRevoked && Array.isArray(raw.cleanupFiles) ? sanitizeJsonValue(raw.cleanupFiles) : [],
     skipped: Array.isArray(raw.skipped) ? sanitizeJsonValue(raw.skipped) : [],
     changedRefs,
+    textChanges,
+    unverifiedWrites: sanitizeJsonValue(raw.unverifiedWrites ?? []),
+    cleanupRevoked,
+    caseInsensitivePaths: raw.caseInsensitivePaths === true,
     issues: Array.isArray(raw.issues) ? sanitizeJsonValue(raw.issues) : []
   };
 }
@@ -1025,6 +1200,10 @@ export function mergeMigrationReports(previous, current) {
   if (previous.worldId !== current.worldId) return current;
 
   const changedRefs = mergeChangedReferences(previous.changedRefs, current.changedRefs);
+  const textChanges = sanitizeTextChanges([...(previous.textChanges ?? []), ...(current.textChanges ?? [])]);
+  const blockedCleanupPaths = [...currentReversePaths(current), ...(current.skipped ?? []).map((item) => item.oldPath)].filter(Boolean);
+  const blocksFile = (file) => blockedCleanupPaths.some((pattern) =>
+    patternMatches(pattern, file.oldPath, previous.caseInsensitivePaths === true || current.caseInsensitivePaths === true));
   const sourceManifestIds = [...new Set([
     ...(previous.sourceManifestIds ?? [previous.sourceManifestId]),
     ...(current.sourceManifestIds ?? [current.sourceManifestId])
@@ -1035,17 +1214,17 @@ export function mergeMigrationReports(previous, current) {
   const currentTouchedPaths = new Set([...currentMigratedPaths, ...currentSkippedPaths]);
   const reversePaths = currentReversePaths(current);
 
-  const previousCleanup = (previous.cleanupFiles ?? []).filter((file) => {
+  const previousCleanup = (previous.cleanupRevoked ? [] : previous.cleanupFiles ?? []).filter((file) => {
     const manifestPath = file?.manifestOldPath ?? file?.oldPath;
-    return !reversePaths.has(manifestPath) && !currentSkippedPaths.has(manifestPath);
+    return !blocksFile(file) && !reversePaths.has(manifestPath) && !currentSkippedPaths.has(manifestPath);
   });
   const roots = [...new Set([previous.sourceDataRootId, current.sourceDataRootId].filter(Boolean))];
   const dataRootConflict = roots.length > 1;
   const currentCleanup = (current.cleanupFiles ?? []).filter((file) => {
     const manifestPath = file?.manifestOldPath ?? file?.oldPath;
-    return !currentSkippedPaths.has(manifestPath) && !reversePaths.has(manifestPath);
+    return !blocksFile(file) && !currentSkippedPaths.has(manifestPath) && !reversePaths.has(manifestPath);
   });
-  const cleanupFiles = dataRootConflict
+  const cleanupFiles = dataRootConflict || current.cleanupRevoked
     ? []
     : mergeByKey(previousCleanup, currentCleanup, cleanupFileKey);
   const sourceDataRootId = dataRootConflict ? null : (roots[0] ?? null);
@@ -1097,6 +1276,9 @@ export function mergeMigrationReports(previous, current) {
 
   return {
     ...current,
+    textChanges,
+    unverifiedWrites: [...(previous.unverifiedWrites ?? []), ...(current.unverifiedWrites ?? [])],
+    cleanupRevoked: current.cleanupRevoked === true || (previous.cleanupRevoked === true && cleanupFiles.length === 0),
     sourceManifestIds,
     sourceDataRootId,
     migrated,
@@ -1111,7 +1293,10 @@ export function mergeMigrationReports(previous, current) {
 export async function rollbackCorePublicPlaceholders(migrationReport, options = {}, hooks = {}) {
   const changedRefs = (migrationReport?.changedRefs ?? []).filter(isCorePublicPlaceholderReference);
   if (!changedRefs.length) throw new Error("В migration report нет замененных ссылок Foundry Core Data для восстановления.");
-  const filtered = { ...deepClone(migrationReport), changedRefs };
+  revokeCleanupAuthorization(migrationReport);
+  const textChanges = sanitizeTextChanges(migrationReport.textChanges).filter((change) =>
+    change.operations.every(({ ref }) => isCorePublicPlaceholderReference({ ...ref, appliedDirection: "placeholder" })));
+  const filtered = { ...deepClone(migrationReport), changedRefs, textChanges };
   const summary = await rollbackMigration(filtered, options, hooks);
   return { ...summary, matched: changedRefs.length };
 }
@@ -1119,8 +1304,11 @@ export async function rollbackCorePublicPlaceholders(migrationReport, options = 
 export async function rollbackMigration(migrationReport, options = {}, { onProgress, signal } = {}) {
   if (!game.user?.isGM) throw new Error("Откат доступен только GM.");
   if (migrationReport?.worldId !== (game.world?.id ?? null)) throw new Error("Migration report относится к другому миру.");
-  const changedRefs = migrationReport?.changedRefs ?? [];
-  if (!changedRefs.length) throw new Error("В migration report нет ссылок, измененных этим запуском.");
+  revokeCleanupAuthorization(migrationReport);
+  const textChanges = sanitizeTextChanges(migrationReport.textChanges);
+  const snapshotFields = new Set(textChanges.map((change) => textFieldKey(change.operations[0].ref)));
+  const changedRefs = (migrationReport?.changedRefs ?? []).filter((ref) => ref.mode !== "text" || !snapshotFields.has(textFieldKey(ref)));
+  if (!changedRefs.length && !textChanges.length) throw new Error("В migration report нет ссылок, измененных этим запуском.");
 
   const normalizedOptions = {
     autoUnlockWorldPacks: options.autoUnlockWorldPacks !== false,
@@ -1140,6 +1328,36 @@ export async function rollbackMigration(migrationReport, options = {}, { onProgr
   const forwardApplied = changedRefs.filter((ref) => ref.appliedDirection !== "reverse" && ref.appliedDirection !== "placeholder");
   const reverseApplied = changedRefs.filter((ref) => ref.appliedDirection === "reverse");
   const results = [];
+  for (let index = textChanges.length - 1; index >= 0; index -= 1) {
+    const change = textChanges[index];
+    const ref = change.operations[0].ref;
+    const snapshotRefs = [...new Map(change.operations.map(({ ref: input }) => [referenceKey(input), input])).values()];
+    if (change.rolledBack === true) {
+      for (const input of snapshotRefs) results.push({ ref: input, status: "already" });
+      continue;
+    }
+    // A previous partial rollback may already have unwound multiple snapshots
+    // of this field. Recognize earlier states only along a continuous chain.
+    const earlierValues = [];
+    let before = change.before;
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      const candidate = textChanges[previous];
+      if (textFieldKey(candidate.operations[0].ref) !== textFieldKey(ref)) continue;
+      if (candidate.after !== before) break;
+      before = candidate.before;
+      earlierValues.push(before);
+    }
+    const result = await processDocumentTasks([{ oldPath: ref.oldPath, newPath: ref.newPath, refs: [ref] }], normalizedOptions, true,
+      { signal, onProgress, textRestore: { ...change, earlierValues } });
+    for (const item of result.results) {
+      if (item.ref) for (const input of snapshotRefs) results.push({ ...item, ref: input, entryOldPath: input.oldPath, entryNewPath: input.newPath });
+      else results.push(item);
+    }
+    if (result.results.some((item) => item.ref && ["changed", "already"].includes(item.status))) {
+      const saved = migrationReport.textChanges?.find((item) => item.id === change.id);
+      if (saved) saved.rolledBack = true;
+    }
+  }
   // Placeholder replacement is terminal: once a PNG/WEBP reference becomes an
   // SVG it disappears from later scans. Roll it back first, then unwind any
   // earlier PNG<->WEBP transition recorded for the same field.
@@ -1155,6 +1373,7 @@ export async function rollbackMigration(migrationReport, options = {}, { onProgr
     const entries = buildEntries(phase.refs);
     const phaseResult = await processDocumentTasks(entries, normalizedOptions, phase.reverse, {
       signal,
+      rollbackWithoutSnapshots: true,
       onProgress: ({ label }) => {
         completed += 1;
         onProgress?.({ current: completed, total: Math.max(total, completed), label });
@@ -1164,6 +1383,8 @@ export async function rollbackMigration(migrationReport, options = {}, { onProgr
   }
 
   return {
+    cancelled: signal?.aborted === true,
+    cleanupRevoked: true,
     changed: results.filter((result) => result.status === "changed").length,
     already: results.filter((result) => result.status === "already").length,
     stale: results.filter((result) => result.status === "stale").length,

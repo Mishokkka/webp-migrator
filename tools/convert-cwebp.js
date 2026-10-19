@@ -5,9 +5,10 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { spawnSync } = require("child_process");
+const { inflateSync } = require("zlib");
 
-const TOOL_VERSION = "0.4.7";
-const REPORT_SCHEMA_VERSION = 4;
+const TOOL_VERSION = "0.4.8";
+const REPORT_SCHEMA_VERSION = 5;
 const CONVERSION_SUCCESS = new Set(["converted", "exists", "exists-missing-old"]);
 const HASH_RE = /^[a-f0-9]{64}$/i;
 const FOUNDRY_V13_PUBLIC_DIRS = new Set(["cards", "css", "fonts", "icons", "lang", "scripts", "sounds", "ui"]);
@@ -18,6 +19,7 @@ const ARG_SPEC = Object.freeze({
   restore: "value",
   data: "value",
   cwebp: "value",
+  dwebp: "value",
   quality: "value",
   method: "value",
   out: "value",
@@ -107,13 +109,14 @@ Options:
   --restore <file>        Cleanup report containing quarantined files
   --data <folder>         Foundry UserData/Data folder
   --cwebp <file>          Full path to cwebp.exe, or cwebp from PATH
+  --dwebp <file>          Decoder (default: beside cwebp, or dwebp from PATH)
   --quality <1..100>      Lossy quality, default 85
   --method <0..6>         Compression method, default 6
   --lossless              Use lossless WebP
   --overwrite             Replace an existing WEBP
   --trust-existing        Accept an existing WEBP older than its PNG source
   --allow-larger          Accept WEBP files larger than their PNG source
-  --dry-run               Preview conversion without writing WEBP
+  --dry-run               Preview any mode; never convert, move, or delete assets
   --delete                During cleanup, move PNG to quarantine
   --permanent-delete      With --delete, unlink PNG instead of quarantine
   --quarantine <folder>   Relative folder inside Data for quarantined PNG
@@ -127,7 +130,7 @@ Safety:
   - --audit only reads and reports files; it never converts, moves, or deletes them.
   - Strict argument parsing rejects unknown options and values for boolean flags.
   - APNG is rejected before existing-WEBP handling.
-  - WEBP RIFF structure, dimensions and hashes are recorded and rechecked.
+  - PNG and WEBP must fully decode; dimensions and hashes are rechecked.
   - Symlinks and junction-like path escapes below Data are rejected.
   - Cleanup uses only the concrete file list recorded during conversion.
   - Source and target SHA-256 hashes must still match before cleanup.
@@ -195,21 +198,13 @@ function validateDataRoot(input) {
   };
 }
 
-function decodePath(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
 function normalizeRelativePath(value) {
   const original = String(value ?? "");
   if (!original || original.length > 4096 || original.includes("\0")) throw new Error(`Invalid local path: ${original}`);
   if (/^(?:https?:|data:|blob:|file:|ftp:|s3:)/i.test(original)) throw new Error(`Not a local Foundry Data path: ${original}`);
   if (/^(?:[a-z]:[\\/]|[a-z]:(?![\\/])|[\\/]{2})/i.test(original)) throw new Error(`Absolute, drive-relative, or UNC path is not allowed: ${original}`);
 
-  let relative = decodePath(original).replace(/\\/g, "/").replace(/^\/+/, "");
+  let relative = original.replace(/\\/g, "/").replace(/^\/+/, "");
   while (relative.startsWith("./")) relative = relative.slice(2);
   relative = relative.replace(/\/{2,}/g, "/");
   const segments = [];
@@ -282,8 +277,82 @@ function readExact(fd, length, position) {
   return bytes === length ? buffer : null;
 }
 
+let decoderCommands = null;
+
+function defaultDecoders(args = {}) {
+  const cwebp = String(args.cwebp || process.env.FWM_CWEBP || "cwebp");
+  const sibling = /[\\/]/.test(cwebp) ? path.join(path.dirname(cwebp), process.platform === "win32" ? "dwebp.exe" : "dwebp") : "dwebp";
+  return { cwebp, dwebp: String(args.dwebp || process.env.FWM_DWEBP || sibling) };
+}
+
+function configureDecoders(args = {}) {
+  const commands = defaultDecoders(args);
+  for (const [name, command] of Object.entries(commands)) {
+    const probe = spawnSync(command, ["-version"], { encoding: "utf8", windowsHide: true, timeout: 10000 });
+    if (probe.error || probe.status !== 0) throw new Error(`${name} is unavailable: ${command}. Supply --${name} or add libwebp to PATH. ${probe.error?.message ?? probe.stderr ?? ""}`);
+  }
+  decoderCommands = commands;
+  return commands;
+}
+
+function decodeImage(file, format) {
+  const commands = decoderCommands ?? defaultDecoders();
+  const sink = process.platform === "win32" ? "NUL" : "/dev/null";
+  const command = format === "png" ? commands.cwebp : commands.dwebp;
+  // PPM avoids Windows WIC's seekable-output requirement when writing to NUL.
+  const args = format === "png" ? ["-quiet", "-q", "0", "-m", "0", file, "-o", sink] : [file, "-quiet", "-ppm", "-o", sink];
+  const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true, timeout: 120000, maxBuffer: 1024 * 1024 });
+  if (result.error || result.signal) {
+    const error = new Error(`Cannot validate ${format.toUpperCase()} with ${command}: ${result.error?.message ?? result.signal}`);
+    error.decoderUnavailable = true;
+    throw error;
+  }
+  return { valid: result.status === 0, error: result.status === 0 ? undefined : (result.stderr || "Image decoder rejected the file.").trim() };
+}
+
+const MAX_PNG_DECODE_BYTES = 512 * 1024 * 1024;
+const CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
+  for (let bit = 0; bit < 8; bit += 1) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+  return value >>> 0;
+});
+
+function pngCrc(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ byte) & 0xff];
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function validatePngPixels(ihdr, idat) {
+  const width = ihdr.readUInt32BE(0);
+  const height = ihdr.readUInt32BE(4);
+  const depth = ihdr[8];
+  const color = ihdr[9];
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[color];
+  const depths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] }[color];
+  if (!channels || !depths.includes(depth) || ihdr[10] !== 0 || ihdr[11] !== 0 || ihdr[12] > 1) throw new Error("Invalid PNG color, depth, compression or interlace method.");
+  const passes = ihdr[12] === 0 ? [[0, 0, 1, 1]] : [
+    [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]
+  ];
+  const rows = passes.map(([x, y, dx, dy]) => {
+    const columns = Math.max(0, Math.ceil((width - x) / dx));
+    const count = Math.max(0, Math.ceil((height - y) / dy));
+    return { count: columns ? count : 0, stride: 1 + Math.ceil(columns * channels * depth / 8) };
+  });
+  const expected = rows.reduce((sum, row) => sum + row.count * row.stride, 0);
+  if (!expected || expected > MAX_PNG_DECODE_BYTES) throw new Error("PNG validation exceeds the 512 MiB decoded-data limit.");
+  const pixels = inflateSync(Buffer.concat(idat), { maxOutputLength: expected + 1 });
+  if (pixels.length !== expected) throw new Error("PNG image data is incomplete or exceeds its declared dimensions.");
+  let position = 0;
+  for (const { count, stride } of rows) {
+    for (let row = 0; row < count; row += 1, position += stride) {
+      if (pixels[position] > 4) throw new Error("PNG contains an invalid row filter.");
+    }
+  }
+}
+
 function inspectPng(file) {
   let fd;
+  let animated = false;
   const invalid = (error, animated = false) => ({ valid: false, animated, error });
   try {
     const stat = fs.statSync(file);
@@ -297,10 +366,11 @@ function inspectPng(file) {
     let position = 8;
     let width = null;
     let height = null;
-    let animated = false;
     let sawIhdr = false;
     let sawIdat = false;
     let sawIend = false;
+    let ihdr = null;
+    const idat = [];
     while (position + 12 <= stat.size) {
       const header = readExact(fd, 8, position);
       if (!header) return invalid("PNG chunk header is truncated.", animated);
@@ -308,6 +378,10 @@ function inspectPng(file) {
       const type = header.toString("ascii", 4, 8);
       const end = position + 12 + length;
       if (end > stat.size) return invalid(`PNG chunk ${type || "<unknown>"} is truncated.`, animated);
+      if (length > MAX_PNG_DECODE_BYTES) return invalid("PNG chunk exceeds validation memory limit.", animated);
+      const chunk = readExact(fd, length + 4, position + 4);
+      const checksum = readExact(fd, 4, position + 8 + length);
+      if (!chunk || !checksum || pngCrc(chunk) !== checksum.readUInt32BE(0)) return invalid(`PNG chunk ${type} has an invalid CRC.`, animated);
       if (!sawIhdr && type !== "IHDR") return invalid("PNG does not start with an IHDR chunk.", animated);
       if (type === "IHDR") {
         if (sawIhdr || length !== 13) return invalid("PNG contains an invalid IHDR chunk.", animated);
@@ -315,9 +389,10 @@ function inspectPng(file) {
         if (!data) return invalid("PNG IHDR data is truncated.", animated);
         width = data.readUInt32BE(0);
         height = data.readUInt32BE(4);
+        ihdr = data;
         sawIhdr = true;
       } else if (type === "acTL") animated = true;
-      else if (type === "IDAT") sawIdat = true;
+      else if (type === "IDAT") { sawIdat = true; idat.push(chunk.subarray(4)); }
       else if (type === "IEND") {
         if (length !== 0) return invalid("PNG contains an invalid IEND chunk.", animated);
         sawIend = true;
@@ -334,9 +409,14 @@ function inspectPng(file) {
     // cwebp/libpng tolerate these in practice, and rejecting them during a
     // dry-run creates false negatives even though conversion succeeds. The
     // complete file is still fingerprinted for cleanup safety.
-    return { valid: true, width, height, animated };
+    // Windows WIC may accept truncated IDAT streams. Check CRCs, inflate length
+    // and row filters independently before asking the platform decoder to read.
+    validatePngPixels(ihdr, idat);
+    const decoded = decodeImage(file, "png");
+    return { ...decoded, decoded: decoded.valid, width, height, animated };
   } catch (error) {
-    return invalid(error?.message ?? String(error));
+    if (error.decoderUnavailable) throw error;
+    return invalid(error?.message ?? String(error), animated);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
@@ -388,8 +468,11 @@ function inspectWebp(file) {
 
       position = dataPosition + paddedLength;
     }
-    return { valid: !!(width && height && imageChunk && !animated && position === stat.size), width, height, animated, imageChunk };
-  } catch {
+    if (!(width && height && imageChunk && !animated && position === stat.size)) return { valid: false, width, height, animated, imageChunk };
+    const decoded = decodeImage(file, "webp");
+    return { ...decoded, decoded: decoded.valid, width, height, animated, imageChunk };
+  } catch (error) {
+    if (error.decoderUnavailable) throw error;
     return { valid: false };
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
@@ -465,24 +548,6 @@ function pngToWebp(relative) {
   return relative.replace(/\.png$/i, ".webp");
 }
 
-function validateCwebp(command) {
-  const explicit = command.includes("/") || command.includes("\\") || /\.exe$/i.test(command);
-  if (explicit) {
-    const absolute = path.resolve(command);
-    if (!fs.existsSync(absolute)) throw new Error(`cwebp executable does not exist: ${absolute}`);
-    const stat = fs.statSync(absolute);
-    if (stat.isDirectory()) throw new Error(`--cwebp points to a folder. Specify the executable itself, for example: ${path.join(absolute, "cwebp.exe")}`);
-    command = absolute;
-  }
-  const probe = spawnSync(command, ["-version"], { encoding: "utf8", windowsHide: true });
-  if (probe.error) {
-    if (probe.error.code === "ENOENT") throw new Error(`cwebp was not found: ${command}. Pass the full path to cwebp.exe with --cwebp.`);
-    throw probe.error;
-  }
-  if (probe.status !== 0) throw new Error(`cwebp failed its version check (${probe.status}): ${(probe.stderr || probe.stdout || "").trim()}`);
-  return command;
-}
-
 function runCwebp({ cwebp, input, output, quality, method, lossless }) {
   const args = lossless
     ? ["-lossless", "-exact", "-q", String(quality), "-m", String(method), "-mt", input, "-o", output]
@@ -552,6 +617,7 @@ function makeConcreteResult(relativeOld, relativeNew, status, oldAbs, newAbs, pn
       newSize: null, newMtimeMs: null, newSha256: null, newWidth: null, newHeight: null
     }),
     sourceAnimated: pngInfo?.animated === true,
+    decoderVerified: webpInfo?.decoded === true && (status === "exists-missing-old" || pngInfo?.decoded === true),
     savedPercent: percent(oldAbs ? fileSize(oldAbs) : null, newAbs ? fileSize(newAbs) : null),
     ...extra
   };
@@ -686,7 +752,7 @@ function uniqueEntries(entries) {
     if (normalizeForHash(pngToWebp(oldPath)) !== normalizeForHash(newPath)) {
       throw new Error(`Invalid oldPath/newPath pair: ${entry.oldPath} -> ${entry.newPath}`);
     }
-    const key = normalizeForHash(oldPath);
+    const key = oldPath;
     const existing = map.get(key);
     if (existing && normalizeForHash(existing.newPath) !== normalizeForHash(newPath)) {
       throw new Error(`Conflicting duplicate manifest path: ${oldPath}`);
@@ -736,12 +802,14 @@ function auditFileState(root, relative, format) {
   }
   const stat = fs.statSync(absolute);
   if (!stat.isFile()) {
-    return { exists: true, valid: false, animated: false, width: null, height: null, size: stat.size, mtimeMs: stat.mtimeMs, sha256: null, error: "Path is not a regular file." };
+    return { exists: true, valid: false, checked: true, animated: false, width: null, height: null, size: stat.size, mtimeMs: stat.mtimeMs, sha256: null, error: "Path is not a regular file." };
   }
   const inspection = format === "png" ? inspectPng(absolute) : inspectWebp(absolute);
   return {
     exists: true,
     valid: inspection.valid === true,
+    checked: true,
+    decoded: inspection.decoded === true,
     animated: format === "png" && inspection.animated === true,
     width: inspection.width ?? null,
     height: inspection.height ?? null,
@@ -775,7 +843,7 @@ function auditCategory(file) {
 function auditForwardSafe(file) {
   if (!file.webp.valid || file.png.animated) return false;
   if (!file.png.valid) return true;
-  return auditDimensionsMatch(file) === true;
+  return auditDimensionsMatch(file) === true && file.webp.mtimeMs + 1 >= file.png.mtimeMs;
 }
 
 function auditReverseSafe(file) {
@@ -907,7 +975,7 @@ function convert(args) {
   if (!Number.isFinite(quality) || quality < 1 || quality > 100) throw new Error("--quality must be 1..100.");
   if (!Number.isFinite(method) || method < 0 || method > 6) throw new Error("--method must be 0..6.");
   const dryRun = args["dry-run"] === true;
-  const cwebp = dryRun ? String(args.cwebp || "cwebp") : validateCwebp(String(args.cwebp || "cwebp"));
+  const { cwebp } = configureDecoders(args);
   const options = {
     cwebp,
     quality,
@@ -946,6 +1014,7 @@ function convert(args) {
     sourceManifestId: manifest.manifestId,
     sourceWorldId: manifest.worldId ?? null,
     dataRootId: root.id,
+    caseInsensitivePaths: process.platform === "win32",
     dryRun,
     options: {
       quality,
@@ -992,6 +1061,7 @@ function audit(args) {
     }
   }
 
+  configureDecoders(args);
   const pairs = uniqueAuditEntries(manifest);
   const walkCache = new Map();
   const entries = [];
@@ -1021,6 +1091,7 @@ function audit(args) {
     sourceManifestId: manifest.manifestId,
     sourceWorldId: manifest.worldId ?? null,
     dataRootId: root.id,
+    caseInsensitivePaths: process.platform === "win32",
     summary: summarizeAudit(entries),
     entries,
     sourceManifest: reportLocalPath(args["include-local-paths"], manifestPath),
@@ -1112,6 +1183,8 @@ function cleanup(args) {
   const migrationPath = path.resolve(args.cleanup);
   const migration = readJson(migrationPath);
   if (migration.type !== "fbl-webp-migrator-migration-report") throw new Error("Input is not a FBL WebP Migrator migration report.");
+  if (!(Number(migration.schemaVersion) >= 5)) throw new Error("Migration report predates the safety fixes. Repeat scan, conversion verification and migration with 0.4.8+ before cleanup.");
+  if (migration.cleanupRevoked === true) throw new Error("Cleanup authorization was revoked by rollback. Export a new report after a new scan and migration.");
   const root = validateDataRoot(args.data);
   validateWorldBinding(root, migration, args);
   if (!Array.isArray(migration.cleanupFiles)) throw new Error("Migration report has no concrete cleanupFiles list. Cleanup is refused.");
@@ -1119,10 +1192,12 @@ function cleanup(args) {
   const map = new Map();
   for (const input of migration.cleanupFiles) {
     const file = sanitizeCleanupFile(input);
-    map.set(`${file.oldPath}|${file.oldSha256}`, file);
+    const oldPathKey = migration.caseInsensitivePaths === true ? file.oldPath.toLowerCase() : file.oldPath;
+    map.set(`${oldPathKey}|${file.oldSha256}`, file);
   }
   const files = [...map.values()];
-  const doDelete = args.delete === true;
+  configureDecoders(args);
+  const doDelete = args.delete === true && args["dry-run"] !== true;
   const permanent = args["permanent-delete"] === true;
   const quarantineRoot = normalizeRelativeDirectory(args.quarantine || `.fbl-webp-migrator-quarantine/${stamp()}`);
   const action = { mode: !doDelete ? "dry-run" : permanent ? "delete" : "quarantine", quarantineRoot };
@@ -1149,6 +1224,7 @@ function cleanup(args) {
     sourceDataRootId: migration.sourceDataRootId ?? null,
     worldId: migration.worldId ?? null,
     dataRootId: root.id,
+    caseInsensitivePaths: process.platform === "win32",
     mode: action.mode,
     quarantineRoot: action.mode === "quarantine" ? quarantineRoot : null,
     summary: {
@@ -1172,7 +1248,7 @@ function cleanup(args) {
   return report;
 }
 
-function restoreConcrete(root, entry) {
+function restoreConcrete(root, entry, { dryRun = false } = {}) {
   const oldPath = normalizeRelativePath(entry.oldPath);
   const quarantinePath = normalizeRelativePath(entry.quarantinePath);
   const oldAbs = toAbsolute(root, oldPath, { allowMissingLeaf: true });
@@ -1182,6 +1258,7 @@ function restoreConcrete(root, entry) {
   if (!HASH_RE.test(String(entry.oldSha256 ?? "")) || sha256File(quarantineAbs) !== String(entry.oldSha256).toLowerCase()) {
     return { oldPath, quarantinePath, status: "skipped", error: "Quarantined file hash does not match cleanup report." };
   }
+  if (dryRun) return { oldPath, quarantinePath, status: "would-restore" };
   fs.mkdirSync(path.dirname(oldAbs), { recursive: true });
   assertNoSymlinkPath(root, path.dirname(oldAbs));
   fs.renameSync(quarantineAbs, oldAbs);
@@ -1204,7 +1281,7 @@ function restore(args) {
     if (input?.status !== "quarantined" || !input.quarantinePath) continue;
     let result;
     try {
-      result = restoreConcrete(root, input);
+      result = restoreConcrete(root, input, { dryRun: args["dry-run"] === true });
     } catch (error) {
       result = { oldPath: input.oldPath, quarantinePath: input.quarantinePath, status: "failed", error: error.message ?? String(error) };
     }
@@ -1217,8 +1294,10 @@ function restore(args) {
     version: TOOL_VERSION,
     createdAt: new Date().toISOString(),
     dataRootId: root.id,
+    caseInsensitivePaths: process.platform === "win32",
     summary: {
       input: entries.length,
+      wouldRestore: entries.filter((entry) => entry.status === "would-restore").length,
       restored: entries.filter((entry) => entry.status === "restored").length,
       skipped: entries.filter((entry) => entry.status === "skipped").length,
       missingQuarantine: entries.filter((entry) => entry.status === "missing-quarantine").length,
@@ -1236,6 +1315,18 @@ function restore(args) {
   return report;
 }
 
+function validateModeOptions(args) {
+  const mode = ["manifest", "audit", "cleanup", "restore"].find((key) => args[key]);
+  const shared = [mode, "data", "out", "world-id", "dry-run", "include-local-paths", "force-data-root", "help"];
+  const allowed = new Set([...shared, ...({
+    manifest: ["cwebp", "dwebp", "quality", "method", "lossless", "overwrite", "trust-existing", "allow-larger"],
+    audit: ["cwebp", "dwebp"],
+    cleanup: ["cwebp", "dwebp", "delete", "permanent-delete", "quarantine"],
+    restore: []
+  }[mode] ?? [])]);
+  for (const key of Object.keys(args)) if (!allowed.has(key)) throw new Error(`--${key} cannot be used with --${mode}.`);
+}
+
 function main(argv = process.argv.slice(2)) {
   let args;
   try {
@@ -1250,6 +1341,7 @@ function main(argv = process.argv.slice(2)) {
   }
   if (modes !== 1) fail("Use exactly one of --manifest, --audit, --cleanup, or --restore.");
   try {
+    validateModeOptions(args);
     if (args.manifest) convert(args);
     else if (args.audit) audit(args);
     else if (args.cleanup) cleanup(args);
@@ -1262,6 +1354,8 @@ function main(argv = process.argv.slice(2)) {
 module.exports = {
   TOOL_VERSION,
   parseArgs,
+  configureDecoders,
+  validateModeOptions,
   normalizeRelativePath,
   validateDataRoot,
   toAbsolute,

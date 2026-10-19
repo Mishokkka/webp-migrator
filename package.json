@@ -1,9 +1,10 @@
 {
   "name": "fbl-webp-migrator",
   "private": true,
-  "version": "0.4.7",
+  "version": "0.4.8",
   "scripts": {
     "test": "node --test",
+    "test:foundry": "node tools/verify-foundry-model.mjs",
     "check": "node --test && node --check tools/convert-cwebp.js && node --check scripts/main.mjs"
   },
   "engines": {

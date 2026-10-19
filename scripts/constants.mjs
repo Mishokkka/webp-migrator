@@ -1,8 +1,8 @@
 export const MODULE_ID = "fbl-webp-migrator";
 export const MODULE_TITLE = "FBL WebP Migrator";
-export const MODULE_VERSION = "0.4.7";
+export const MODULE_VERSION = "0.4.8";
 export const MANIFEST_SCHEMA_VERSION = 4;
-export const REPORT_SCHEMA_VERSION = 4;
+export const REPORT_SCHEMA_VERSION = 5;
 export const PENDING_RELOCKS_SETTING = "pendingPackRelocks";
 export const MISSING_ASSET_PLACEHOLDER = "icons/svg/mystery-man.svg";
 

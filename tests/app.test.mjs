@@ -112,7 +112,7 @@ test("partial rollback keeps reports available for retry", async () => {
   installRollbackGame("art/other.webp");
   globalThis.confirm = () => true;
   const app = new WebpMigratorApp();
-  const report = { worldId: "world-a", changedRefs: [rollbackRef()] };
+  const report = { worldId: "world-a", changedRefs: [rollbackRef()], cleanupFiles: [{ oldPath: "art/a.png" }], summary: { cleanupEligibleFiles: 1 } };
   app._viewState = {
     busy: false,
     status: "",
@@ -127,6 +127,8 @@ test("partial rollback keeps reports available for retry", async () => {
   assert.equal(app._viewState.rollbackSummary.stale, 1);
   assert.equal(app._viewState.rollbackReport, report);
   assert.equal(app._viewState.migrationReport, report);
+  assert.deepEqual(report.cleanupFiles, []);
+  assert.equal(report.summary.cleanupEligibleFiles, 0);
 });
 
 test("cancel action aborts an active operation and clears its controller", async () => {

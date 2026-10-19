@@ -192,5 +192,6 @@
   "FWM.Status.RestoringCoreData": "Восстанавливаю ссылки Foundry Core Data...",
   "FWM.Status.RestoringCoreDataDocument": "Восстанавливаю {current}/{total}: {label}",
   "FWM.Status.CoreDataRestored": "Core Data: восстановлено {changed}, уже было исправлено {already}, stale {stale}, ошибок {errors}.",
-  "FWM.Errors.NoCoreDataRollback": "В импортированном migration report нет замененных ссылок Foundry Core Data."
+  "FWM.Errors.NoCoreDataRollback": "В импортированном migration report нет замененных ссылок Foundry Core Data.",
+  "FWM.Status.CancelledPartial": "Операция остановлена. Отчёт о выполненных изменениях сохранён; экспортируй его для сохранения истории отката."
 }
